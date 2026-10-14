@@ -76,7 +76,11 @@ enum Theme {
     static let onChip        = dynamic(
         light: NSColor(calibratedRed: 0.10, green: 0.12, blue: 0.16, alpha: 1),
         dark:  .white)
-    static let warning       = Color(red: 1.00, green: 0.80, blue: 0.55)
+    /// Pale amber on dark glass; a deeper amber under a light tint, where
+    /// the pale one washes out.
+    static let warning       = dynamic(
+        light: NSColor(calibratedRed: 0.78, green: 0.42, blue: 0.02, alpha: 1),
+        dark:  NSColor(calibratedRed: 1.00, green: 0.80, blue: 0.55, alpha: 1))
 
     static let textPrimary   = dynamic(
         light: NSColor(white: 0.0, alpha: 0.88),
