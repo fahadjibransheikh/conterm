@@ -228,6 +228,7 @@ extension Ghostty {
             self.handle = s
             self.userdataPtr = boxPtr
             SurfaceRegistry.register(self)
+            ghostty_surface_set_color_scheme(s, App.systemColorScheme)
 
             // libghostty initializes the surface with the cfg's
             // (zero) dimensions. Push the real size + focus on the

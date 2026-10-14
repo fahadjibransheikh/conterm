@@ -34,6 +34,17 @@ extension Ghostty {
         }
         private(set) var inheritWorkingDirectory = InheritWorkingDirectory()
 
+        /// Keeps libghostty's light/dark state in step with macOS so a
+        /// `theme = light:X,dark:Y` config switches live, in every pane.
+        private var appearanceObservation: NSKeyValueObservation?
+
+        /// The system light/dark choice. Read from NSApp, not a view: glass
+        /// views force their own appearance, which isn't the user's choice.
+        static var systemColorScheme: ghostty_color_scheme_e {
+            NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT
+        }
+
         /// Coalesces libghostty wakeups into one queued tick. `wakeup_cb`
         /// fires far faster than the main runloop drains — and a tick can
         /// itself schedule the next wakeup — so posting one `app.tick()`
@@ -232,6 +243,13 @@ extension Ghostty {
             }
             self.handle = app
             App.shared = self
+
+            setColorScheme(App.systemColorScheme)
+            appearanceObservation = NSApp.observe(\.effectiveAppearance) { _, _ in
+                Task { @MainActor in
+                    App.shared?.setColorScheme(App.systemColorScheme)
+                }
+            }
         }
 
         isolated deinit {
@@ -265,8 +283,14 @@ extension Ghostty {
             }
         }
         func setFocus(_ focused: Bool) { ghostty_app_set_focus(handle, focused) }
+        /// Pushes the scheme to the app (for new surfaces) and to every
+        /// live surface, which re-resolves conditional config like
+        /// `theme = light:…,dark:…` in place.
         func setColorScheme(_ s: ghostty_color_scheme_e) {
             ghostty_app_set_color_scheme(handle, s)
+            for ctrl in SurfaceRegistry.allControllers() {
+                if let h = ctrl.handle { ghostty_surface_set_color_scheme(h, s) }
+            }
         }
 
         /// Re-read the user's `~/.config/conterm/config` (and the rest
