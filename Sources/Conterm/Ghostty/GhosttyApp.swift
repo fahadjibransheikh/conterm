@@ -287,6 +287,7 @@ extension Ghostty {
         /// live surface, which re-resolves conditional config like
         /// `theme = light:…,dark:…` in place.
         func setColorScheme(_ s: ghostty_color_scheme_e) {
+            clog("conterm: color scheme -> \(s == GHOSTTY_COLOR_SCHEME_DARK ? "dark" : "light")")
             ghostty_app_set_color_scheme(handle, s)
             for ctrl in SurfaceRegistry.allControllers() {
                 if let h = ctrl.handle { ghostty_surface_set_color_scheme(h, s) }
@@ -298,6 +299,17 @@ extension Ghostty {
         /// the app + every live surface. Used by the Settings panel
         /// when a theme or font change needs to take effect immediately
         /// without a relaunch.
+        /// Coalesces reload requests: a scheme change asks once per surface.
+        private var reloadPending = false
+        func scheduleReload() {
+            guard !reloadPending else { return }
+            reloadPending = true
+            DispatchQueue.main.async { [weak self] in
+                self?.reloadPending = false
+                self?.reloadConfig()
+            }
+        }
+
         func reloadConfig() {
             guard let newCfg = ghostty_config_new() else { return }
             App.applyConfigChain(newCfg)
