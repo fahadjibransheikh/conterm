@@ -16,6 +16,14 @@ struct UsageLimitsTests {
         #expect(l.weekly?.resetsAt == Date(timeIntervalSince1970: 1_792_216_800))
     }
 
+    @Test func retryAfterIsObeyedWithAFloor() {
+        #expect(UsageLimitsModel.retryDelay("3465") == 3465)
+        // Never sooner than the normal spacing, and a safe default when absent.
+        #expect(UsageLimitsModel.retryDelay("5") == UsageLimitsModel.claudeMinInterval)
+        #expect(UsageLimitsModel.retryDelay(nil) == 600)
+        #expect(UsageLimitsModel.retryDelay("Wed, 21 Oct 2026 07:28:00 GMT") == 600)
+    }
+
     @Test func claudeResponseWithoutWindowsIsNil() {
         #expect(UsageLimitsModel.parseClaude(Data(#"{"five_hour":null}"#.utf8)) == nil)
         #expect(UsageLimitsModel.parseClaude(Data("not json".utf8)) == nil)

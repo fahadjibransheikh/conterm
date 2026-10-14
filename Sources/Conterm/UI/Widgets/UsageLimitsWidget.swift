@@ -44,6 +44,11 @@ final class UsageLimitsModel: ObservableObject {
 
     private var timer: Timer?
     private var inFlight: Set<AgentTool> = []
+    /// Earliest next Claude fetch: the usage endpoint is shared with Claude
+    /// Code's own /usage and rate-limits hard, so app activations and agent
+    /// churn must not each cost a request, and a 429's Retry-After is obeyed.
+    private var claudeNotBefore = Date.distantPast
+    nonisolated static let claudeMinInterval: TimeInterval = 180
     private var activeObs: NSObjectProtocol?
     private var inactiveObs: NSObjectProtocol?
 
@@ -79,11 +84,25 @@ final class UsageLimitsModel: ObservableObject {
     func refresh() {
         for tool in AgentCenter.shared.openTools where Self.providers.contains(tool) {
             guard !inFlight.contains(tool) else { continue }
+            if tool == .claude {
+                guard Date() >= claudeNotBefore else { continue }
+                claudeNotBefore = Date().addingTimeInterval(Self.claudeMinInterval)
+            }
             inFlight.insert(tool)
             Task.detached(priority: .utility) {
-                let read = tool == .claude ? await Self.fetchClaude() : Self.readCodex()
+                var retryAfter: TimeInterval?
+                let read: UsageLimits?
+                if tool == .claude {
+                    (read, retryAfter) = await Self.fetchClaude()
+                } else {
+                    read = Self.readCodex()
+                }
                 await MainActor.run {
                     self.inFlight.remove(tool)
+                    if let retryAfter {
+                        self.claudeNotBefore = max(self.claudeNotBefore,
+                                                   Date().addingTimeInterval(retryAfter))
+                    }
                     guard let read else { self.stale.insert(tool); return }
                     self.stale.remove(tool)
                     if self.limits[tool] != read { self.limits[tool] = read }
@@ -98,23 +117,34 @@ final class UsageLimitsModel: ObservableObject {
 
     // MARK: Claude
 
-    nonisolated private static func fetchClaude() async -> UsageLimits? {
+    /// The reading, plus how long to back off when the endpoint said 429.
+    nonisolated private static func fetchClaude() async -> (UsageLimits?, TimeInterval?) {
         guard let token = claudeAccessToken(),
-              let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else { return nil }
+              let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else { return (nil, nil) }
         var req = URLRequest(url: url, timeoutInterval: 15)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
-            guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
-                clog("usage limits: claude HTTP \((resp as? HTTPURLResponse)?.statusCode ?? -1)")
-                return nil
+            let http = resp as? HTTPURLResponse
+            guard http?.statusCode == 200 else {
+                clog("usage limits: claude HTTP \(http?.statusCode ?? -1)")
+                let backoff = http?.statusCode == 429
+                    ? retryDelay(http?.value(forHTTPHeaderField: "Retry-After")) : nil
+                return (nil, backoff)
             }
-            return parseClaude(data)
+            return (parseClaude(data), nil)
         } catch {
             clog("usage limits: claude fetch failed: \(error.localizedDescription)")
-            return nil
+            return (nil, nil)
         }
+    }
+
+    /// Seconds from a 429's Retry-After (delta-seconds form); 10 min when
+    /// it's missing or unparseable, so a 429 never means "retry next tick".
+    nonisolated static func retryDelay(_ header: String?) -> TimeInterval {
+        header.flatMap { TimeInterval($0.trimmingCharacters(in: .whitespaces)) }
+            .map { max($0, claudeMinInterval) } ?? 600
     }
 
     /// Claude Code's OAuth access token, or nil when it's missing or past
