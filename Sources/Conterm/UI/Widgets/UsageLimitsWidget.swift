@@ -41,6 +41,9 @@ final class UsageLimitsModel: ObservableObject {
     /// Providers whose last read failed: their numbers are the previous
     /// reading, shown dimmed, never passed off as current.
     @Published private(set) var stale: Set<AgentTool> = []
+    /// Set while the Claude endpoint has us rate-limited (a 429), so the
+    /// widget says so instead of a bare dash.
+    @Published private(set) var claudeLimitedUntil: Date?
 
     private var timer: Timer?
     private var inFlight: Set<AgentTool> = []
@@ -102,8 +105,10 @@ final class UsageLimitsModel: ObservableObject {
                     if let retryAfter {
                         self.claudeNotBefore = max(self.claudeNotBefore,
                                                    Date().addingTimeInterval(retryAfter))
+                        self.claudeLimitedUntil = self.claudeNotBefore
                     }
                     guard let read else { self.stale.insert(tool); return }
+                    if tool == .claude { self.claudeLimitedUntil = nil }
                     self.stale.remove(tool)
                     if self.limits[tool] != read { self.limits[tool] = read }
                     self.updatedAt[tool] = Date()
@@ -303,9 +308,15 @@ struct UsageLimitsWidget: View {
                                 AgentMark(tool: t, size: Theme.ui(11))
                             }
                         }
-                        reading(model.limits[tool]?.fiveHour, label: "5h")
-                        widgetChipDivider()
-                        reading(model.limits[tool]?.weekly, label: "wk")
+                        if model.limits[tool] == nil, let until = limitedUntil(tool) {
+                            Text("limited · \(until.formatted(date: .omitted, time: .shortened))")
+                                .font(.system(size: Theme.ui(10.5), weight: .medium, design: .rounded))
+                                .foregroundStyle(Theme.textSecondary)
+                        } else {
+                            reading(model.limits[tool]?.fiveHour, label: "5h")
+                            widgetChipDivider()
+                            reading(model.limits[tool]?.weekly, label: "wk")
+                        }
                     }
                     .opacity(model.stale.contains(tool) ? 0.5 : 1)
                 }
@@ -329,10 +340,17 @@ struct UsageLimitsWidget: View {
         }
     }
 
+    private func limitedUntil(_ tool: AgentTool) -> Date? {
+        tool == .claude ? model.claudeLimitedUntil : nil
+    }
+
     private func help(_ tool: AgentTool) -> String {
+        let limited = limitedUntil(tool).map {
+            " · rate limited, retrying at \($0.formatted(date: .omitted, time: .shortened))"
+        } ?? ""
         guard let l = model.limits[tool] else {
             return "\(tool.displayName) usage limits — "
-                + (model.stale.contains(tool) ? "unavailable" : "loading")
+                + (model.stale.contains(tool) ? "unavailable" : "loading") + limited
         }
         func part(_ name: String, _ w: UsageWindow?) -> String? {
             w.map { "\(name) \(Int($0.used().rounded()))%" + resetPhrase($0, prefix: ", resets ") }
@@ -340,7 +358,7 @@ struct UsageLimitsWidget: View {
         let head = model.stale.contains(tool) ? "\(tool.displayName) (unavailable, last reading)"
                                               : tool.displayName
         return ([head] + [part("5-hour", l.fiveHour), part("weekly", l.weekly)]
-            .compactMap { $0 }).joined(separator: " · ")
+            .compactMap { $0 }).joined(separator: " · ") + limited
     }
 }
 
@@ -370,7 +388,11 @@ private struct UsageLimitsPopover: View {
                                 .font(.system(size: Theme.ui(11.5), weight: .semibold, design: .rounded))
                                 .foregroundStyle(Theme.textPrimary)
                             Spacer()
-                            if model.stale.contains(tool) {
+                            if tool == .claude, let until = model.claudeLimitedUntil {
+                                Text("rate limited · retry \(until.formatted(date: .omitted, time: .shortened))")
+                                    .font(.system(size: Theme.ui(9.5), weight: .medium, design: .rounded))
+                                    .foregroundStyle(Theme.warning)
+                            } else if model.stale.contains(tool) {
                                 Text("unavailable")
                                     .font(.system(size: Theme.ui(9.5), weight: .medium, design: .rounded))
                                     .foregroundStyle(Theme.warning)
@@ -384,7 +406,7 @@ private struct UsageLimitsPopover: View {
                         let l = model.limits[tool]
                         bar("5-hour", l?.fiveHour, tint: tool.glowColor)
                         bar("Weekly", l?.weekly, tint: tool.glowColor)
-                        if l == nil {
+                        if l == nil, !(tool == .claude && model.claudeLimitedUntil != nil) {
                             Text(tool == .claude
                                  ? "No reading yet — needs a Claude Code login."
                                  : "No reading yet — Codex logs limits after its first turn.")
