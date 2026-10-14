@@ -92,6 +92,35 @@ final class Preferences: ObservableObject {
     @Published var lightGlass: Bool {
         didSet { ud.set(lightGlass, forKey: K.lightGlass) }
     }
+    /// Follow macOS light/dark: drives `lightGlass` from the system, and
+    /// `ThemeCatalog` swaps the terminal between `lightThemeID` and
+    /// `darkThemeID` (a libghostty `theme = light:…,dark:…`).
+    @Published var followSystemAppearance: Bool {
+        didSet {
+            ud.set(followSystemAppearance, forKey: K.followSystemAppearance)
+            syncLightGlassToSystem()
+        }
+    }
+    /// Picker theme ids for each appearance while following the system.
+    @Published var lightThemeID: String? {
+        didSet { ud.set(lightThemeID, forKey: K.lightThemeID) }
+    }
+    @Published var darkThemeID: String? {
+        didSet { ud.set(darkThemeID, forKey: K.darkThemeID) }
+    }
+    private var appearanceObservation: NSKeyValueObservation?
+
+    /// True when macOS is in Light mode. Read from NSApp, not a window:
+    /// Conterm pins its windows' appearance to the glass tint.
+    static var systemIsLight: Bool {
+        NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) != .darkAqua
+    }
+
+    private func syncLightGlassToSystem() {
+        guard followSystemAppearance else { return }
+        let light = Self.systemIsLight
+        if lightGlass != light { lightGlass = light }
+    }
     /// Theme source. OFF (default): the Settings ▸ Appearance picker owns
     /// the terminal colors (written as a managed block in the conterm
     /// config). ON: defer to the user's own Ghostty config — the picker
@@ -504,6 +533,9 @@ final class Preferences: ObservableObject {
         static let useDefaultConfig = "conterm.useDefaultConfig"
         static let lightGlass       = "conterm.lightGlass"
         static let themeFromConfig  = "conterm.themeFromConfig"
+        static let followSystemAppearance = "conterm.followSystemAppearance"
+        static let lightThemeID     = "conterm.lightThemeID"
+        static let darkThemeID      = "conterm.darkThemeID"
         static let solidGlass        = "conterm.solidGlass"   // pre-glassMode migration source
         static let glassMode         = "conterm.glassMode"
         static let interfaceStyle    = "conterm.interfaceStyle"
@@ -659,6 +691,9 @@ final class Preferences: ObservableObject {
         self.useDefaultConfig       = ud.object(forKey: K.useDefaultConfig) as? Bool ?? false
         self.lightGlass             = ud.object(forKey: K.lightGlass) as? Bool ?? false
         self.themeFromConfig        = ud.object(forKey: K.themeFromConfig) as? Bool ?? false
+        self.followSystemAppearance = ud.object(forKey: K.followSystemAppearance) as? Bool ?? false
+        self.lightThemeID           = ud.string(forKey: K.lightThemeID)
+        self.darkThemeID            = ud.string(forKey: K.darkThemeID)
         self.glassMode              = GlassMode(rawValue: ud.string(forKey: K.glassMode) ?? "")
             ?? (ud.object(forKey: K.solidGlass) as? Bool).map { $0 ? GlassMode.solid : .glass }
             ?? .blur
@@ -675,6 +710,10 @@ final class Preferences: ObservableObject {
         self.opaquePanes            = ud.object(forKey: K.opaquePanes) as? Bool ?? false
         self.diagnosticLogging      = ud.object(forKey: K.diagnosticLogging) as? Bool ?? false
         refreshPaneBlurFromConfig()
+        syncLightGlassToSystem()
+        appearanceObservation = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+            Task { @MainActor in self?.syncLightGlassToSystem() }
+        }
         // `didSet` doesn't fire during init, so the services these settings
         // drive are handed their values once here.
         Briefing.shared.enabled = briefingEnabled

@@ -15,6 +15,7 @@ final class ThemeCatalog: ObservableObject {
         let accent: Color       // ANSI 4 (blue) — most themes' "accent" register
         let warn: Color         // ANSI 3 (yellow)
         let isDark: Bool
+        let path: String        // theme file; user themes shadow bundled ones
 
         // Equatable + Hashable on id alone — name + colors are derived.
         func hash(into hasher: inout Hasher) { hasher.combine(id) }
@@ -49,9 +50,9 @@ final class ThemeCatalog: ObservableObject {
         guard !didStartLoad else { return }
         didStartLoad = true
         isLoading = true
-        let dir = themesDirectoryURL()
+        let dirs = Self.themeDirectories()
         Task.detached(priority: .userInitiated) {
-            let parsed = Self.parseAll(in: dir)
+            let parsed = Self.parseAll(in: dirs)
             await MainActor.run {
                 self.themes = parsed
                 self.isLoading = false
@@ -62,28 +63,40 @@ final class ThemeCatalog: ObservableObject {
     /// Pure, off-main parse of every theme file in `dir`. `nonisolated`
     /// + `static` so it can run on a background executor without
     /// touching `self`'s main-actor state.
-    nonisolated private static func parseAll(in dir: URL?) -> [Theme] {
-        guard let dir else { return [] }
+    nonisolated private static func parseAll(in dirs: [URL]) -> [Theme] {
         let fm = FileManager.default
-        let names = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
-        var loaded: [Theme] = []
-        for name in names {
-            if name.hasPrefix(".") || name.hasSuffix(".md") { continue }
-            let path = dir.appendingPathComponent(name).path
-            guard let theme = parse(path: path, name: name) else { continue }
-            loaded.append(theme)
+        var byID: [String: Theme] = [:]
+        // Later directories win, so a user theme shadows a bundled one.
+        for dir in dirs {
+            let names = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+            for name in names {
+                if name.hasPrefix(".") || name.hasSuffix(".md") { continue }
+                let path = dir.appendingPathComponent(name).path
+                guard let theme = parse(path: path, name: name) else { continue }
+                byID[name] = theme
+            }
         }
+        var loaded = Array(byID.values)
         loaded.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         return loaded
     }
 
-    nonisolated private func themesDirectoryURL() -> URL? {
-        if let url = Bundle.main.resourceURL?
-            .appendingPathComponent("ghostty/themes"),
-           FileManager.default.fileExists(atPath: url.path) {
-            return url
+    /// Bundled libghostty themes, then the user's own in
+    /// `~/.config/conterm/themes` (Ghostty theme-file syntax).
+    nonisolated static func themeDirectories() -> [URL] {
+        var dirs: [URL] = []
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("ghostty/themes") {
+            dirs.append(bundled)
         }
-        return nil
+        dirs.append(URL(fileURLWithPath: InstanceState.configPath("themes"), isDirectory: true))
+        return dirs.filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// The file behind a theme id, user directory first.
+    nonisolated static func path(forThemeID id: String) -> String? {
+        themeDirectories().reversed()
+            .map { $0.appendingPathComponent(id).path }
+            .first { FileManager.default.fileExists(atPath: $0) }
     }
 
     nonisolated private static func parse(path: String, name: String) -> Theme? {
@@ -123,7 +136,8 @@ final class ThemeCatalog: ObservableObject {
             foreground: fg,
             accent: palette[4] ?? palette[12] ?? fg,
             warn: palette[3] ?? palette[11] ?? fg,
-            isDark: bg.luminance < 0.5
+            isDark: bg.luminance < 0.5,
+            path: path
         )
     }
 
@@ -146,6 +160,28 @@ final class ThemeCatalog: ObservableObject {
         Ghostty.App.shared?.reloadConfig()
     }
 
+    /// Follow macOS: one theme for Light mode, one for Dark. Written as a
+    /// libghostty `theme = light:…,dark:…` (absolute paths, so bundled and
+    /// user themes resolve alike); Conterm pushes the system color scheme
+    /// so open panes switch live. Explicit colors elsewhere in the config
+    /// would shadow it, which is why the managed block drops them.
+    func applyPair(light: String, dark: String) {
+        guard let lp = Self.path(forThemeID: light),
+              let dp = Self.path(forThemeID: dark) else { return }
+        UserConfigStore.writeManagedThemeBlock(
+            themeID: "\(light) | \(dark)",
+            colorLines: ["theme = light:\(lp),dark:\(dp)"])
+        current = Preferences.systemIsLight ? light : dark
+        Ghostty.App.shared?.reloadConfig()
+    }
+
+    /// Re-point `current` after macOS switches, so the picker's selection
+    /// tracks the theme on screen.
+    func refreshPairSelection(prefs: Preferences) {
+        guard prefs.followSystemAppearance else { return }
+        current = Preferences.systemIsLight ? prefs.lightThemeID : prefs.darkThemeID
+    }
+
     /// Hand color control back to the user's own config: remove the
     /// managed block and reload. The included Ghostty config (and any
     /// hardcoded background/palette) then sets the colors again.
@@ -160,10 +196,8 @@ final class ThemeCatalog: ObservableObject {
     /// can't set anyway). Emitted into the user config so the theme's
     /// colors land as explicit keys that override a hardcoded palette.
     nonisolated private static func colorLines(forThemeID id: String) -> [String] {
-        guard let dir = Bundle.main.resourceURL?
-            .appendingPathComponent("ghostty/themes") else { return [] }
-        let path = dir.appendingPathComponent(id).path
-        guard let body = try? String(contentsOfFile: path, encoding: .utf8) else {
+        guard let path = path(forThemeID: id),
+              let body = try? String(contentsOfFile: path, encoding: .utf8) else {
             return []
         }
         var out: [String] = []
