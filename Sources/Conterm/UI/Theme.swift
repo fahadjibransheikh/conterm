@@ -37,12 +37,16 @@ enum Theme {
     /// Solid bed for the pane-floating chips (the dir/title pill, the
     /// command-result badge). Opaque so they read as solid chips over the
     /// terminal, a step lighter than `paneTile` for separation.
-    static let paneTitleBar  = Color(red: 0.12, green: 0.13, blue: 0.16)
+    static let paneTitleBar  = dynamic(
+        light: NSColor(calibratedRed: 0.955, green: 0.950, blue: 0.965, alpha: 1),
+        dark:  NSColor(calibratedRed: 0.12, green: 0.13, blue: 0.16, alpha: 1))
 
     /// Bed for the title pill while the pane is SSH'd. Same lightness as
     /// `paneTitleBar` but pushed cool/blue so a remote pane reads as
     /// remote at a glance, with no per-frame cost.
-    static let paneRemoteBar = Color(red: 0.07, green: 0.13, blue: 0.20)
+    static let paneRemoteBar = dynamic(
+        light: NSColor(calibratedRed: 0.86, green: 0.92, blue: 0.98, alpha: 1),
+        dark:  NSColor(calibratedRed: 0.07, green: 0.13, blue: 0.20, alpha: 1))
 
     /// SSH cyan, on the dark pill bed — the remote-state hue for the
     /// glyph glow, border, and connect sweep.
@@ -67,6 +71,11 @@ enum Theme {
     /// regular `accent` flips near-black in light mode and would vanish
     /// against the dark bed — this stays the cool near-white.
     static let accentOnDark  = Color(red: 0.92, green: 0.96, blue: 1.00)
+    /// Ink on the pane chips (title pill, badges, close button): white on
+    /// the dark chip bed, cool near-black once a light tint lightens it.
+    static let onChip        = dynamic(
+        light: NSColor(calibratedRed: 0.10, green: 0.12, blue: 0.16, alpha: 1),
+        dark:  .white)
     static let warning       = Color(red: 1.00, green: 0.80, blue: 0.55)
 
     static let textPrimary   = dynamic(
