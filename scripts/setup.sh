@@ -110,7 +110,7 @@ fi
 # runtime network; Ghostty publishes no canonical default-config URL —
 # the binary is the source of truth).
 GHOSTTY_BIN="/Applications/Ghostty.app/Contents/MacOS/ghostty"
-THEME_KEYS_RE='^(background|foreground|palette|cursor-color|cursor-text|selection-background|selection-foreground) ='
+THEME_KEYS_RE='^(background|foreground|palette|cursor-color|cursor-text|selection-background|selection-foreground|minimum-contrast) ='
 if [[ -x "$GHOSTTY_BIN" ]]; then
     _gd_tmp="$(mktemp)"
     "$GHOSTTY_BIN" +show-config --default > "$_gd_tmp"
@@ -121,7 +121,7 @@ if [[ -x "$GHOSTTY_BIN" ]]; then
             "# libghostty's compiled-in defaults, NOT a personal config." \
             "# Do not edit; regenerated on every setup." \
             "#"
-        # Drop the color keys a theme sets. libghostty applies `theme`
+        # Drop the keys a theme sets (colors, minimum-contrast). libghostty applies `theme`
         # first and then replays every loaded line over it, so explicit
         # defaults here would shadow any user `theme =`. Their values are
         # the compiled-in defaults, so omitting them changes nothing else.
