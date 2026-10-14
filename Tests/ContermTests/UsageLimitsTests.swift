@@ -22,6 +22,10 @@ struct UsageLimitsTests {
         #expect(UsageLimitsModel.retryDelay("5") == UsageLimitsModel.claudeMinInterval)
         #expect(UsageLimitsModel.retryDelay(nil) == 600)
         #expect(UsageLimitsModel.retryDelay("Wed, 21 Oct 2026 07:28:00 GMT") == 600)
+        // Non-finite and huge values can't poison or stall the schedule.
+        #expect(UsageLimitsModel.retryDelay("nan") == 600)
+        #expect(UsageLimitsModel.retryDelay("inf") == 600)
+        #expect(UsageLimitsModel.retryDelay("9999999") == 86_400)
     }
 
     @Test func claudeResponseWithoutWindowsIsNil() {
@@ -42,6 +46,8 @@ struct UsageLimitsTests {
         #expect(l.fiveHour?.usedPercent == 12.5)
         #expect(l.weekly?.usedPercent == 41)
         #expect(l.weekly?.resetsAt == Date(timeIntervalSince1970: 1_792_216_800))
+        // The reading is dated by its event, not by when we read it.
+        #expect(l.observedAt == UsageLimitsModel.parseISODate("2026-10-14T10:06:00.000Z"))
     }
 
     @Test func codexWindowMinutesDecideTheSlot() throws {

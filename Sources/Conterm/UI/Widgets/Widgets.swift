@@ -681,16 +681,19 @@ final class GitStatusModel: ObservableObject {
     nonisolated private static func compute(cwd: String) -> Snapshot {
         // The common dir (not --show-toplevel) so a linked worktree reports
         // its main repo's name rather than the worktree folder's.
-        guard let lines = git(cwd, ["rev-parse", "--path-format=absolute",
-                                    "--git-common-dir", "--abbrev-ref", "HEAD"])?
-            .split(separator: "\n").map({ $0.trimmingCharacters(in: .whitespaces) }),
-              lines.count == 2, !lines[1].isEmpty else {
+        // --path-format needs git 2.31; an older git falls back to the
+        // branch alone rather than hiding the widget.
+        let lines = (git(cwd, ["rev-parse", "--path-format=absolute",
+                               "--git-common-dir", "--abbrev-ref", "HEAD"])
+                     ?? git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]))?
+            .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) } ?? []
+        guard let raw = lines.last, !raw.isEmpty else {
             return Snapshot()   // not a git repo (or no git)
         }
         var s = Snapshot()
         s.inRepo = true
-        s.repo = repoName(commonDir: lines[0])
-        s.branch = lines[1] == "HEAD" ? "detached" : lines[1]
+        if lines.count == 2 { s.repo = repoName(commonDir: lines[0]) }
+        s.branch = raw == "HEAD" ? "detached" : raw
         let status = git(cwd, ["status", "--porcelain"]) ?? ""
         s.dirty = !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if let ab = git(cwd, ["rev-list", "--left-right", "--count", "HEAD...@{u}"]) {

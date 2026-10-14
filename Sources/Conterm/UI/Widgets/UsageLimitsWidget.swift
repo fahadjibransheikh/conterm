@@ -19,6 +19,8 @@ struct UsageWindow: Equatable {
 struct UsageLimits: Equatable {
     var fiveHour: UsageWindow?
     var weekly: UsageWindow?
+    /// When the source recorded this reading, if it says (Codex events do).
+    var observedAt: Date?
 }
 
 /// Polls the 5-hour and weekly plan limits for the agent CLIs that have a
@@ -44,6 +46,15 @@ final class UsageLimitsModel: ObservableObject {
     /// Set while the Claude endpoint has us rate-limited (a 429), so the
     /// widget says so instead of a bare dash.
     @Published private(set) var claudeLimitedUntil: Date?
+    /// `claudeLimitedUntil` while it's still ahead; a passed one is moot.
+    var claudeRateLimitedUntil: Date? {
+        claudeLimitedUntil.flatMap { $0 > Date() ? $0 : nil }
+    }
+    /// The retry time, with the date when it's more than 12 hours out.
+    static func retryTime(_ d: Date) -> String {
+        d.timeIntervalSinceNow > 43_200 ? d.formatted(date: .abbreviated, time: .shortened)
+                                        : d.formatted(date: .omitted, time: .shortened)
+    }
 
     private var timer: Timer?
     private var inFlight: Set<AgentTool> = []
@@ -85,10 +96,15 @@ final class UsageLimitsModel: ObservableObject {
     /// Re-read every open provider. Also called when a provider's first
     /// session appears, so the pill fills in without waiting for a tick.
     func refresh() {
+        // The timer outlives the widget; only poll while it's enabled.
+        guard (InstanceState.defaults.stringArray(forKey: "conterm.enabledWidgets") ?? [])
+            .contains(WidgetKind.usageLimits.rawValue) else { return }
         for tool in AgentCenter.shared.openTools where Self.providers.contains(tool) {
             guard !inFlight.contains(tool) else { continue }
             if tool == .claude {
-                guard Date() >= claudeNotBefore else { continue }
+                // An isolated (dev) instance shares the real token and the
+                // endpoint's rate limit; keep it off the network.
+                guard !InstanceState.isolated, Date() >= claudeNotBefore else { continue }
                 claudeNotBefore = Date().addingTimeInterval(Self.claudeMinInterval)
             }
             inFlight.insert(tool)
@@ -111,7 +127,7 @@ final class UsageLimitsModel: ObservableObject {
                     if tool == .claude { self.claudeLimitedUntil = nil }
                     self.stale.remove(tool)
                     if self.limits[tool] != read { self.limits[tool] = read }
-                    self.updatedAt[tool] = Date()
+                    self.updatedAt[tool] = read.observedAt ?? Date()
                 }
             }
         }
@@ -122,6 +138,9 @@ final class UsageLimitsModel: ObservableObject {
 
     // MARK: Claude
 
+    /// No cache or cookie jar for a bearer-token request.
+    nonisolated private static let session = URLSession(configuration: .ephemeral)
+
     /// The reading, plus how long to back off when the endpoint said 429.
     nonisolated private static func fetchClaude() async -> (UsageLimits?, TimeInterval?) {
         guard let token = claudeAccessToken(),
@@ -130,7 +149,7 @@ final class UsageLimitsModel: ObservableObject {
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await session.data(for: req)
             let http = resp as? HTTPURLResponse
             guard http?.statusCode == 200 else {
                 clog("usage limits: claude HTTP \(http?.statusCode ?? -1)")
@@ -145,11 +164,13 @@ final class UsageLimitsModel: ObservableObject {
         }
     }
 
-    /// Seconds from a 429's Retry-After (delta-seconds form); 10 min when
-    /// it's missing or unparseable, so a 429 never means "retry next tick".
+    /// Seconds from a 429's Retry-After (delta-seconds form), between the
+    /// normal spacing and a day; 10 min when missing or unparseable, so a
+    /// 429 never means "retry next tick".
     nonisolated static func retryDelay(_ header: String?) -> TimeInterval {
-        header.flatMap { TimeInterval($0.trimmingCharacters(in: .whitespaces)) }
-            .map { max($0, claudeMinInterval) } ?? 600
+        guard let s = header?.trimmingCharacters(in: .whitespaces),
+              let secs = TimeInterval(s), secs.isFinite else { return 600 }
+        return min(max(secs, claudeMinInterval), 86_400)
     }
 
     /// Claude Code's OAuth access token, or nil when it's missing or past
@@ -159,9 +180,12 @@ final class UsageLimitsModel: ObservableObject {
         p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
         p.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
         let out = Pipe()
+        p.standardInput = FileHandle.nullDevice
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
         do { try p.run() } catch { return nil }
+        // A locked keychain or an ACL prompt would block the read forever.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { if p.isRunning { p.terminate() } }
         let data = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         guard p.terminationStatus == 0,
@@ -206,7 +230,10 @@ final class UsageLimitsModel: ObservableObject {
             let size = (try? h.seekToEnd()) ?? 0
             try? h.seek(toOffset: size > 512_000 ? size - 512_000 : 0)
             guard let data = try? h.readToEnd(),
-                  let text = String(data: data, encoding: .utf8) else { continue }
+                  !data.isEmpty else { continue }
+            // Lossy decode: the tail can start mid-character; that partial
+            // first line just fails to parse.
+            let text = String(decoding: data, as: UTF8.self)
             if let limits = parseCodexRollout(text) { return limits }
         }
         return nil
@@ -264,6 +291,7 @@ final class UsageLimitsModel: ObservableObject {
                     limits.fiveHour = window
                 }
             }
+            limits.observedAt = parseISODate(obj["timestamp"] as? String)
             if limits.fiveHour != nil || limits.weekly != nil { return limits }
         }
         return nil
@@ -276,7 +304,8 @@ struct UsageLimitsWidget: View {
     var compact: Bool
     @ObservedObject private var model = UsageLimitsModel.shared
     @ObservedObject private var agents = AgentCenter.shared
-    @AppStorage("usageLimitsWidget.selected") private var selectedRaw = AgentTool.claude.rawValue
+    @AppStorage("conterm.usageLimitsWidget.selected", store: InstanceState.defaults)
+    private var selectedRaw = AgentTool.claude.rawValue
     @State private var showingPopover = false
 
     private var open: [AgentTool] {
@@ -309,7 +338,7 @@ struct UsageLimitsWidget: View {
                             }
                         }
                         if model.limits[tool] == nil, let until = limitedUntil(tool) {
-                            Text("limited · \(until.formatted(date: .omitted, time: .shortened))")
+                            Text("limited · \(UsageLimitsModel.retryTime(until))")
                                 .font(.system(size: Theme.ui(10.5), weight: .medium, design: .rounded))
                                 .foregroundStyle(Theme.textSecondary)
                         } else {
@@ -341,12 +370,12 @@ struct UsageLimitsWidget: View {
     }
 
     private func limitedUntil(_ tool: AgentTool) -> Date? {
-        tool == .claude ? model.claudeLimitedUntil : nil
+        tool == .claude ? model.claudeRateLimitedUntil : nil
     }
 
     private func help(_ tool: AgentTool) -> String {
         let limited = limitedUntil(tool).map {
-            " · rate limited, retrying at \($0.formatted(date: .omitted, time: .shortened))"
+            " · rate limited, retrying at \(UsageLimitsModel.retryTime($0))"
         } ?? ""
         guard let l = model.limits[tool] else {
             return "\(tool.displayName) usage limits — "
@@ -388,8 +417,8 @@ private struct UsageLimitsPopover: View {
                                 .font(.system(size: Theme.ui(11.5), weight: .semibold, design: .rounded))
                                 .foregroundStyle(Theme.textPrimary)
                             Spacer()
-                            if tool == .claude, let until = model.claudeLimitedUntil {
-                                Text("rate limited · retry \(until.formatted(date: .omitted, time: .shortened))")
+                            if tool == .claude, let until = model.claudeRateLimitedUntil {
+                                Text("rate limited · retry \(UsageLimitsModel.retryTime(until))")
                                     .font(.system(size: Theme.ui(9.5), weight: .medium, design: .rounded))
                                     .foregroundStyle(Theme.warning)
                             } else if model.stale.contains(tool) {
@@ -406,7 +435,7 @@ private struct UsageLimitsPopover: View {
                         let l = model.limits[tool]
                         bar("5-hour", l?.fiveHour, tint: tool.glowColor)
                         bar("Weekly", l?.weekly, tint: tool.glowColor)
-                        if l == nil, !(tool == .claude && model.claudeLimitedUntil != nil) {
+                        if l == nil, !(tool == .claude && model.claudeRateLimitedUntil != nil) {
                             Text(tool == .claude
                                  ? "No reading yet — needs a Claude Code login."
                                  : "No reading yet — Codex logs limits after its first turn.")
