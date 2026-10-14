@@ -138,10 +138,12 @@ enum UserConfigStore {
     /// the pick win regardless. Non-destructive: the user's earlier lines
     /// stay (just overridden); removing this block restores them.
     /// `colorLines` are verbatim `key = value` lines from the theme file.
-    static func writeManagedThemeBlock(themeID: String, colorLines: [String]) {
+    static func writeManagedThemeBlock(themeID: String, colorLines: [String],
+                                       disablingExplicitColors: Bool = false) {
         var lines = currentLines()
         lines = strippingManagedThemeBlock(lines)
         lines = strippingTopLevelTheme(lines)
+        if disablingExplicitColors { lines = disablingColorLines(lines) }
         while let last = lines.last,
               last.trimmingCharacters(in: .whitespaces).isEmpty {
             lines.removeLast()
@@ -210,6 +212,29 @@ enum UserConfigStore {
         var result = lines
         result.removeSubrange(start...min(end, lines.count - 1))
         return result
+    }
+
+    static let disabledMarker = "# (off: theme picker follows macOS) "
+    private static let colorKeys: Set<String> = [
+        "background", "foreground", "palette", "cursor-color", "cursor-text",
+        "selection-background", "selection-foreground",
+    ]
+
+    /// Comment out explicit colors and theme-file includes. libghostty
+    /// replays every loaded line over a `theme`, so either would pin one
+    /// appearance's colors over a light/dark pair. Commented, not removed,
+    /// so the user can restore them.
+    private static func disablingColorLines(_ lines: [String]) -> [String] {
+        let themesDir = InstanceState.configPath("themes")
+        return lines.map { line in
+            let t = line.trimmingCharacters(in: .whitespaces)
+            guard !t.hasPrefix("#"), let eq = t.firstIndex(of: "=") else { return line }
+            let key = t[..<eq].trimmingCharacters(in: .whitespaces)
+            let value = t[t.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            let themeInclude = key == "config-file"
+                && (value.contains("/themes/") || value.hasPrefix(themesDir))
+            return colorKeys.contains(key) || themeInclude ? disabledMarker + line : line
+        }
     }
 
     /// Drop any uncommented top-level `theme = …` line — the picker owns

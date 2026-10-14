@@ -161,18 +161,26 @@ final class ThemeCatalog: ObservableObject {
     }
 
     /// Follow macOS: one theme for Light mode, one for Dark. Written as a
-    /// libghostty `theme = light:…,dark:…` (absolute paths, so bundled and
-    /// user themes resolve alike); Conterm pushes the system color scheme
+    /// libghostty `theme = light:…,dark:…` (see `themeRef`); Conterm pushes the system color scheme
     /// so open panes switch live. Explicit colors elsewhere in the config
-    /// would shadow it, which is why the managed block drops them.
+    /// would shadow it, so those lines get commented out.
     func applyPair(light: String, dark: String) {
-        guard let lp = Self.path(forThemeID: light),
-              let dp = Self.path(forThemeID: dark) else { return }
+        guard let lp = Self.themeRef(light), let dp = Self.themeRef(dark) else { return }
         UserConfigStore.writeManagedThemeBlock(
             themeID: "\(light) | \(dark)",
-            colorLines: ["theme = light:\(lp),dark:\(dp)"])
+            colorLines: ["theme = light:\(lp),dark:\(dp)"],
+            disablingExplicitColors: true)
         current = Preferences.systemIsLight ? light : dark
         Ghostty.App.shared?.reloadConfig()
+    }
+
+    /// How a pair names a theme: bundled ones by name (libghostty finds
+    /// them in the app's resources wherever the app lives), user ones by
+    /// absolute path (libghostty doesn't search ~/.config/conterm/themes).
+    nonisolated private static func themeRef(_ id: String) -> String? {
+        guard let path = path(forThemeID: id) else { return nil }
+        let bundled = Bundle.main.resourceURL?.appendingPathComponent("ghostty/themes").path
+        return bundled.map { path.hasPrefix($0 + "/") } == true ? id : path
     }
 
     /// Re-point `current` after macOS switches, so the picker's selection

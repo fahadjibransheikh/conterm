@@ -113,7 +113,8 @@ final class Preferences: ObservableObject {
     /// True when macOS is in Light mode. Read from NSApp, not a window:
     /// Conterm pins its windows' appearance to the glass tint.
     static var systemIsLight: Bool {
-        NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) != .darkAqua
+        // NSApp is nil outside a running app (unit tests): treat as light.
+        NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) != .darkAqua
     }
 
     private func syncLightGlassToSystem() {
@@ -711,7 +712,7 @@ final class Preferences: ObservableObject {
         self.diagnosticLogging      = ud.object(forKey: K.diagnosticLogging) as? Bool ?? false
         refreshPaneBlurFromConfig()
         syncLightGlassToSystem()
-        appearanceObservation = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+        appearanceObservation = NSApp?.observe(\.effectiveAppearance) { [weak self] _, _ in
             Task { @MainActor in self?.syncLightGlassToSystem() }
         }
         // `didSet` doesn't fire during init, so the services these settings
