@@ -34,6 +34,17 @@ extension Ghostty {
         }
         private(set) var inheritWorkingDirectory = InheritWorkingDirectory()
 
+        /// Keeps libghostty's light/dark state in step with macOS so a
+        /// `theme = light:X,dark:Y` config switches live, in every pane.
+        private var appearanceObservation: NSKeyValueObservation?
+
+        /// The system light/dark choice. Read from NSApp, not a view: glass
+        /// views force their own appearance, which isn't the user's choice.
+        static var systemColorScheme: ghostty_color_scheme_e {
+            NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT
+        }
+
         /// Coalesces libghostty wakeups into one queued tick. `wakeup_cb`
         /// fires far faster than the main runloop drains — and a tick can
         /// itself schedule the next wakeup — so posting one `app.tick()`
@@ -232,6 +243,13 @@ extension Ghostty {
             }
             self.handle = app
             App.shared = self
+
+            setColorScheme(App.systemColorScheme)
+            appearanceObservation = NSApp.observe(\.effectiveAppearance) { _, _ in
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { App.shared?.setColorScheme(App.systemColorScheme) }
+                }
+            }
         }
 
         isolated deinit {
@@ -242,6 +260,7 @@ extension Ghostty {
                 ghostty_app_free(h)
             }
             ghostty_config_free(config)
+            if let liveConfig { ghostty_config_free(liveConfig) }
         }
 
         func tick() { ghostty_app_tick(handle) }
@@ -265,8 +284,43 @@ extension Ghostty {
             }
         }
         func setFocus(_ focused: Bool) { ghostty_app_set_focus(handle, focused) }
+        /// Pushes the scheme to the app (for new surfaces) and to every
+        /// live surface, which re-resolves conditional config like
+        /// `theme = light:…,dark:…` in place.
         func setColorScheme(_ s: ghostty_color_scheme_e) {
             ghostty_app_set_color_scheme(handle, s)
+            for ctrl in SurfaceRegistry.allControllers() {
+                if let h = ctrl.handle { ghostty_surface_set_color_scheme(h, s) }
+            }
+        }
+
+        /// The config most recently pushed by `reloadConfig`, kept so a soft
+        /// reload can re-push it. nil until the first reload (boot config used).
+        private var liveConfig: ghostty_config_t?
+        /// Pending `reload_config` action: nil none, true soft only, false
+        /// hard. A scheme change raises one soft request per surface.
+        private var reloadPending: Bool?
+
+        /// libghostty's `reload_config` action. Soft (after a light/dark
+        /// change) re-pushes the current config so each surface re-resolves
+        /// conditional keys like `theme = light:…,dark:…` without touching
+        /// disk; hard (the keybind) re-reads the files.
+        func scheduleReload(soft: Bool) {
+            let wasPending = reloadPending != nil
+            reloadPending = (reloadPending ?? true) && soft
+            guard !wasPending else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let soft = self.reloadPending else { return }
+                self.reloadPending = nil
+                if soft { self.pushConfig(self.liveConfig ?? self.config) } else { self.reloadConfig() }
+            }
+        }
+
+        private func pushConfig(_ cfg: ghostty_config_t) {
+            ghostty_app_update_config(handle, cfg)
+            for ctrl in SurfaceRegistry.allControllers() {
+                if let h = ctrl.handle { ghostty_surface_update_config(h, cfg) }
+            }
         }
 
         /// Re-read the user's `~/.config/conterm/config` (and the rest
@@ -278,18 +332,14 @@ extension Ghostty {
             guard let newCfg = ghostty_config_new() else { return }
             App.applyConfigChain(newCfg)
             ghostty_config_finalize(newCfg)
-            ghostty_app_update_config(handle, newCfg)
             // Push to every surface so live panes pick up the new
             // colors/font without a relaunch.
-            for ctrl in SurfaceRegistry.allControllers() {
-                if let h = ctrl.handle {
-                    ghostty_surface_update_config(h, newCfg)
-                }
-            }
+            pushConfig(newCfg)
             inheritWorkingDirectory = App.readInheritWorkingDirectory(newCfg)
-            // Free the ephemeral config — both app + surfaces have
-            // copied what they need internally.
-            ghostty_config_free(newCfg)
+            // App + surfaces copied what they need; keep this one only for
+            // soft reloads, freeing the one it replaces.
+            if let liveConfig { ghostty_config_free(liveConfig) }
+            liveConfig = newCfg
             // Let Preferences re-parse view-scoped config values that
             // aren't directly fed back through libghostty (currently
             // just `background-blur`, which Conterm renders per-window

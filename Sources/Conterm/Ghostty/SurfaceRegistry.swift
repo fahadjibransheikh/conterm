@@ -61,6 +61,17 @@ extension Ghostty {
             target: ghostty_target_s,
             action: ghostty_action_s
         ) -> Bool {
+            // libghostty asks for a soft reload after a light/dark change
+            // (to re-resolve `theme = light:…,dark:…`) and a hard one from
+            // the `reload_config` keybind; see `App.scheduleReload`.
+            if action.tag == GHOSTTY_ACTION_RELOAD_CONFIG {
+                let soft = action.action.reload_config.soft
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { Ghostty.App.shared?.scheduleReload(soft: soft) }
+                }
+                return true
+            }
+
             let surfaceHandle: UnsafeMutableRawPointer?
             if target.tag == GHOSTTY_TARGET_SURFACE {
                 surfaceHandle = target.target.surface
