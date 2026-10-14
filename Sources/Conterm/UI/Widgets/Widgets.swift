@@ -578,6 +578,7 @@ struct BatteryWidget: View {
 final class GitStatusModel: ObservableObject {
     struct Snapshot: Equatable {
         var inRepo = false
+        var repo: String?
         var branch: String?
         var dirty = false
         var ahead = 0
@@ -674,12 +675,20 @@ final class GitStatusModel: ObservableObject {
     }
 
     nonisolated private static func compute(cwd: String) -> Snapshot {
-        guard let raw = git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"])?
-            .trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+        // The common dir (not --show-toplevel) so a linked worktree reports
+        // its main repo's name rather than the worktree folder's.
+        // --path-format needs git 2.31; an older git falls back to the
+        // branch alone rather than hiding the widget.
+        let lines = (git(cwd, ["rev-parse", "--path-format=absolute",
+                               "--git-common-dir", "--abbrev-ref", "HEAD"])
+                     ?? git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]))?
+            .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) } ?? []
+        guard let raw = lines.last, !raw.isEmpty else {
             return Snapshot()   // not a git repo (or no git)
         }
         var s = Snapshot()
         s.inRepo = true
+        if lines.count == 2 { s.repo = repoName(commonDir: lines[0]) }
         s.branch = raw == "HEAD" ? "detached" : raw
         let status = git(cwd, ["status", "--porcelain"]) ?? ""
         s.dirty = !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -689,6 +698,15 @@ final class GitStatusModel: ObservableObject {
             if parts.count == 2 { s.ahead = parts[0]; s.behind = parts[1] }
         }
         return s
+    }
+
+    /// `/x/conterm/.git` → `conterm`; bare `/x/conterm.git` → `conterm`.
+    nonisolated static func repoName(commonDir: String) -> String {
+        let url = URL(fileURLWithPath: commonDir)
+        let name = url.lastPathComponent == ".git"
+            ? url.deletingLastPathComponent().lastPathComponent
+            : url.lastPathComponent
+        return name.hasSuffix(".git") ? String(name.dropLast(4)) : name
     }
 
     /// Run `git -C <cwd> …` off the main thread. nil on any non-zero exit
@@ -726,6 +744,14 @@ struct GitWidget: View {
                 WidgetShell(compact: compact, help: help, onTap: {}) {
                     HStack(spacing: Theme.ui(5)) {
                         widgetIcon("arrow.triangle.branch")
+                        if let repo = model.snap.repo {
+                            Text(repo)
+                                .font(.system(size: Theme.ui(11), weight: .medium, design: .rounded))
+                                .foregroundStyle(Theme.textSecondary)
+                                .lineLimit(1)
+                                .frame(maxWidth: Theme.ui(compact ? 120 : 90))
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
                         Text(branch)
                             .font(.system(size: Theme.ui(11), weight: .semibold, design: .rounded))
                             .foregroundStyle(Theme.textPrimary)
@@ -769,7 +795,7 @@ struct GitWidget: View {
     }
 
     private var help: String {
-        var s = "git · \(model.snap.branch ?? "?")"
+        var s = "git · \(model.snap.repo ?? "?") · \(model.snap.branch ?? "?")"
         if model.snap.dirty { s += " · uncommitted changes" }
         if model.snap.ahead > 0 { s += " · ↑\(model.snap.ahead)" }
         if model.snap.behind > 0 { s += " · ↓\(model.snap.behind)" }
