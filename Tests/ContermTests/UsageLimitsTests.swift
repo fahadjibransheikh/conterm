@@ -6,31 +6,18 @@ import Testing
 /// the `token_count` events Codex writes into its session rollout.
 struct UsageLimitsTests {
 
-    @Test func claudeUsageResponseParses() throws {
-        let json = #"{"five_hour":{"utilization":21.0,"resets_at":"2026-10-14T15:00:00.524003+00:00"},"seven_day":{"utilization":64.5,"resets_at":"2026-10-17T06:00:00+00:00"},"seven_day_opus":null}"#
-        let l = try #require(UsageLimitsModel.parseClaude(Data(json.utf8)))
-        #expect(l.fiveHour?.usedPercent == 21)
-        #expect(l.weekly?.usedPercent == 64.5)
-        // Six-digit fractional seconds must not defeat the date parse.
-        #expect(l.fiveHour?.resetsAt == Date(timeIntervalSince1970: 1_791_990_000.524))
-        #expect(l.weekly?.resetsAt == Date(timeIntervalSince1970: 1_792_216_800))
-    }
-
-    @Test func retryAfterIsObeyedWithAFloor() {
-        #expect(UsageLimitsModel.retryDelay("3465") == 3465)
-        // Never sooner than the normal spacing, and a safe default when absent.
-        #expect(UsageLimitsModel.retryDelay("5") == UsageLimitsModel.claudeMinInterval)
-        #expect(UsageLimitsModel.retryDelay(nil) == 600)
-        #expect(UsageLimitsModel.retryDelay("Wed, 21 Oct 2026 07:28:00 GMT") == 600)
-        // Non-finite and huge values can't poison or stall the schedule.
-        #expect(UsageLimitsModel.retryDelay("nan") == 600)
-        #expect(UsageLimitsModel.retryDelay("inf") == 600)
-        #expect(UsageLimitsModel.retryDelay("9999999") == 86_400)
-    }
-
-    @Test func claudeResponseWithoutWindowsIsNil() {
-        #expect(UsageLimitsModel.parseClaude(Data(#"{"five_hour":null}"#.utf8)) == nil)
-        #expect(UsageLimitsModel.parseClaude(Data("not json".utf8)) == nil)
+    @Test func claudeStatusLineRateLimitsParse() throws {
+        // What ClaudeUsageTap saves: the status line input's `rate_limits`.
+        let json = #"{"five_hour":{"used_percentage":23.5,"resets_at":1738425600},"seven_day":{"used_percentage":41.2,"resets_at":1738857600}}"#
+        let l = try #require(ClaudeUsageTap.parse(Data(json.utf8)))
+        #expect(l.fiveHour?.usedPercent == 23.5)
+        #expect(l.weekly?.usedPercent == 41.2)
+        #expect(l.fiveHour?.resetsAt == Date(timeIntervalSince1970: 1_738_425_600))
+        // Each window may be absent on its own.
+        let only = try #require(ClaudeUsageTap.parse(Data(#"{"seven_day":{"used_percentage":5}}"#.utf8)))
+        #expect(only.fiveHour == nil && only.weekly?.resetsAt == nil)
+        #expect(ClaudeUsageTap.parse(Data("{}".utf8)) == nil)
+        #expect(ClaudeUsageTap.parse(Data("not json".utf8)) == nil)
     }
 
     @Test func codexRolloutTakesTheNewestTokenCount() throws {

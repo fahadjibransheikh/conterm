@@ -23,17 +23,14 @@ struct UsageLimits: Equatable {
     var observedAt: Date?
 }
 
-/// Polls the 5-hour and weekly plan limits for the agent CLIs that have a
-/// live session in some pane (`AgentCenter.openTools`).
+/// Reads the 5-hour and weekly plan limits for the agent CLIs that have a
+/// live session in some pane (`AgentCenter.openTools`). Both sources are
+/// local files the CLIs write themselves; no credentials, no network.
 ///
-/// • Claude: the same endpoint Claude Code's `/usage` reads, authorised
-///   with the OAuth token Claude Code keeps in the login keychain. The
-///   token is read through `/usr/bin/security` — the item's ACL trusts that
-///   binary, so no keychain prompt — and never refreshed or written here:
-///   an expired token just leaves the last reading in place.
-/// • Codex: no network. Codex logs a `token_count` event carrying its
-///   `rate_limits` into the session rollout after each turn; the newest one
-///   is the current reading.
+/// • Claude: `rate_limits` from Claude Code's status line input, saved by
+///   `ClaudeUsageTap` (Settings ▸ Config).
+/// • Codex: Codex logs a `token_count` event carrying its `rate_limits`
+///   into the session rollout after each turn; the newest one is current.
 @MainActor
 final class UsageLimitsModel: ObservableObject {
     static let shared = UsageLimitsModel()
@@ -43,26 +40,8 @@ final class UsageLimitsModel: ObservableObject {
     /// Providers whose last read failed: their numbers are the previous
     /// reading, shown dimmed, never passed off as current.
     @Published private(set) var stale: Set<AgentTool> = []
-    /// Set while the Claude endpoint has us rate-limited (a 429), so the
-    /// widget says so instead of a bare dash.
-    @Published private(set) var claudeLimitedUntil: Date?
-    /// `claudeLimitedUntil` while it's still ahead; a passed one is moot.
-    var claudeRateLimitedUntil: Date? {
-        claudeLimitedUntil.flatMap { $0 > Date() ? $0 : nil }
-    }
-    /// The retry time, with the date when it's more than 12 hours out.
-    static func retryTime(_ d: Date) -> String {
-        d.timeIntervalSinceNow > 43_200 ? d.formatted(date: .abbreviated, time: .shortened)
-                                        : d.formatted(date: .omitted, time: .shortened)
-    }
-
     private var timer: Timer?
     private var inFlight: Set<AgentTool> = []
-    /// Earliest next Claude fetch: the usage endpoint is shared with Claude
-    /// Code's own /usage and rate-limits hard, so app activations and agent
-    /// churn must not each cost a request, and a 429's Retry-After is obeyed.
-    private var claudeNotBefore = Date.distantPast
-    nonisolated static let claudeMinInterval: TimeInterval = 180
     private var activeObs: NSObjectProtocol?
     private var inactiveObs: NSObjectProtocol?
 
@@ -81,9 +60,8 @@ final class UsageLimitsModel: ObservableObject {
 
     private func start() {
         guard timer == nil else { return }
-        // Limits move by a few percent per turn; 3 min keeps the pill
-        // honest without hammering the usage endpoint.
-        let t = Timer(timeInterval: 180, repeats: true) { [weak self] _ in
+        // Both sources are local files; a minute keeps the pill current.
+        let t = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
         }
         t.tolerance = 30
@@ -101,30 +79,12 @@ final class UsageLimitsModel: ObservableObject {
             .contains(WidgetKind.usageLimits.rawValue) else { return }
         for tool in AgentCenter.shared.openTools where Self.providers.contains(tool) {
             guard !inFlight.contains(tool) else { continue }
-            if tool == .claude {
-                // An isolated (dev) instance shares the real token and the
-                // endpoint's rate limit; keep it off the network.
-                guard !InstanceState.isolated, Date() >= claudeNotBefore else { continue }
-                claudeNotBefore = Date().addingTimeInterval(Self.claudeMinInterval)
-            }
             inFlight.insert(tool)
             Task.detached(priority: .utility) {
-                var retryAfter: TimeInterval?
-                let read: UsageLimits?
-                if tool == .claude {
-                    (read, retryAfter) = await Self.fetchClaude()
-                } else {
-                    read = Self.readCodex()
-                }
+                let read = tool == .claude ? ClaudeUsageTap.read() : Self.readCodex()
                 await MainActor.run {
                     self.inFlight.remove(tool)
-                    if let retryAfter {
-                        self.claudeNotBefore = max(self.claudeNotBefore,
-                                                   Date().addingTimeInterval(retryAfter))
-                        self.claudeLimitedUntil = self.claudeNotBefore
-                    }
                     guard let read else { self.stale.insert(tool); return }
-                    if tool == .claude { self.claudeLimitedUntil = nil }
                     self.stale.remove(tool)
                     if self.limits[tool] != read { self.limits[tool] = read }
                     self.updatedAt[tool] = read.observedAt ?? Date()
@@ -135,79 +95,6 @@ final class UsageLimitsModel: ObservableObject {
 
     /// The agents this widget can report on, in display order.
     static let providers: [AgentTool] = [.claude, .codex]
-
-    // MARK: Claude
-
-    /// No cache or cookie jar for a bearer-token request.
-    nonisolated private static let session = URLSession(configuration: .ephemeral)
-
-    /// The reading, plus how long to back off when the endpoint said 429.
-    nonisolated private static func fetchClaude() async -> (UsageLimits?, TimeInterval?) {
-        guard let token = claudeAccessToken(),
-              let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else { return (nil, nil) }
-        var req = URLRequest(url: url, timeoutInterval: 15)
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        do {
-            let (data, resp) = try await session.data(for: req)
-            let http = resp as? HTTPURLResponse
-            guard http?.statusCode == 200 else {
-                clog("usage limits: claude HTTP \(http?.statusCode ?? -1)")
-                let backoff = http?.statusCode == 429
-                    ? retryDelay(http?.value(forHTTPHeaderField: "Retry-After")) : nil
-                return (nil, backoff)
-            }
-            return (parseClaude(data), nil)
-        } catch {
-            clog("usage limits: claude fetch failed: \(error.localizedDescription)")
-            return (nil, nil)
-        }
-    }
-
-    /// Seconds from a 429's Retry-After (delta-seconds form), between the
-    /// normal spacing and a day; 10 min when missing or unparseable, so a
-    /// 429 never means "retry next tick".
-    nonisolated static func retryDelay(_ header: String?) -> TimeInterval {
-        guard let s = header?.trimmingCharacters(in: .whitespaces),
-              let secs = TimeInterval(s), secs.isFinite else { return 600 }
-        return min(max(secs, claudeMinInterval), 86_400)
-    }
-
-    /// Claude Code's OAuth access token, or nil when it's missing or past
-    /// its expiry (Claude Code refreshes it on its next request).
-    nonisolated private static func claudeAccessToken() -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        p.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
-        let out = Pipe()
-        p.standardInput = FileHandle.nullDevice
-        p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        // A locked keychain or an ACL prompt would block the read forever.
-        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { if p.isRunning { p.terminate() } }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0,
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = obj["claudeAiOauth"] as? [String: Any],
-              let token = oauth["accessToken"] as? String, !token.isEmpty else { return nil }
-        if let ms = oauth["expiresAt"] as? Double,
-           Date(timeIntervalSince1970: ms / 1000) <= Date() { return nil }
-        return token
-    }
-
-    /// `{"five_hour":{"utilization":21.0,"resets_at":"2026-…+00:00"},"seven_day":{…}}`
-    nonisolated static func parseClaude(_ data: Data) -> UsageLimits? {
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        func window(_ key: String) -> UsageWindow? {
-            guard let w = obj[key] as? [String: Any],
-                  let used = (w["utilization"] as? NSNumber)?.doubleValue else { return nil }
-            return UsageWindow(usedPercent: used, resetsAt: parseISODate(w["resets_at"] as? String))
-        }
-        let limits = UsageLimits(fiveHour: window("five_hour"), weekly: window("seven_day"))
-        return limits.fiveHour == nil && limits.weekly == nil ? nil : limits
-    }
 
     nonisolated static func parseISODate(_ s: String?) -> Date? {
         guard let s else { return nil }
@@ -220,9 +107,16 @@ final class UsageLimitsModel: ObservableObject {
 
     // MARK: Codex
 
+    /// Codex's home: `$CODEX_HOME` when set and present, else `~/.codex`
+    /// (Codex's own `find_codex_home`). A GUI launch may not inherit it.
+    nonisolated static var codexHome: String {
+        if let env = ProcessInfo.processInfo.environment["CODEX_HOME"], !env.isEmpty,
+           FileManager.default.fileExists(atPath: env) { return env }
+        return "\(InstanceState.userHome)/.codex"
+    }
+
     nonisolated private static func readCodex() -> UsageLimits? {
-        let root = URL(fileURLWithPath: InstanceState.userHome)
-            .appendingPathComponent(".codex/sessions")
+        let root = URL(fileURLWithPath: codexHome).appendingPathComponent("sessions")
         for path in newestRollouts(under: root) {
             guard let h = FileHandle(forReadingAtPath: path) else { continue }
             defer { try? h.close() }
@@ -241,7 +135,6 @@ final class UsageLimitsModel: ObservableObject {
 
     /// Rollouts live at `sessions/YYYY/MM/DD/rollout-*.jsonl`. Looks at the
     /// newest few day folders only, newest file first.
-    /// shortcut: ignores $CODEX_HOME, add it if anyone relocates ~/.codex.
     nonisolated private static func newestRollouts(under root: URL) -> [String] {
         let fm = FileManager.default
         func children(_ dir: String) -> [String] {
@@ -337,15 +230,9 @@ struct UsageLimitsWidget: View {
                                 AgentMark(tool: t, size: Theme.ui(11))
                             }
                         }
-                        if model.limits[tool] == nil, let until = limitedUntil(tool) {
-                            Text("limited · \(UsageLimitsModel.retryTime(until))")
-                                .font(.system(size: Theme.ui(10.5), weight: .medium, design: .rounded))
-                                .foregroundStyle(Theme.textSecondary)
-                        } else {
-                            reading(model.limits[tool]?.fiveHour, label: "5h")
-                            widgetChipDivider()
-                            reading(model.limits[tool]?.weekly, label: "wk")
-                        }
+                        reading(model.limits[tool]?.fiveHour, label: "5h")
+                        widgetChipDivider()
+                        reading(model.limits[tool]?.weekly, label: "wk")
                     }
                     .opacity(model.stale.contains(tool) ? 0.5 : 1)
                 }
@@ -369,17 +256,10 @@ struct UsageLimitsWidget: View {
         }
     }
 
-    private func limitedUntil(_ tool: AgentTool) -> Date? {
-        tool == .claude ? model.claudeRateLimitedUntil : nil
-    }
-
     private func help(_ tool: AgentTool) -> String {
-        let limited = limitedUntil(tool).map {
-            " · rate limited, retrying at \(UsageLimitsModel.retryTime($0))"
-        } ?? ""
         guard let l = model.limits[tool] else {
             return "\(tool.displayName) usage limits — "
-                + (model.stale.contains(tool) ? "unavailable" : "loading") + limited
+                + (model.stale.contains(tool) ? "no reading yet" : "loading")
         }
         func part(_ name: String, _ w: UsageWindow?) -> String? {
             w.map { "\(name) \(Int($0.used().rounded()))%" + resetPhrase($0, prefix: ", resets ") }
@@ -387,7 +267,7 @@ struct UsageLimitsWidget: View {
         let head = model.stale.contains(tool) ? "\(tool.displayName) (unavailable, last reading)"
                                               : tool.displayName
         return ([head] + [part("5-hour", l.fiveHour), part("weekly", l.weekly)]
-            .compactMap { $0 }).joined(separator: " · ") + limited
+            .compactMap { $0 }).joined(separator: " · ")
     }
 }
 
@@ -417,11 +297,7 @@ private struct UsageLimitsPopover: View {
                                 .font(.system(size: Theme.ui(11.5), weight: .semibold, design: .rounded))
                                 .foregroundStyle(Theme.textPrimary)
                             Spacer()
-                            if tool == .claude, let until = model.claudeRateLimitedUntil {
-                                Text("rate limited · retry \(UsageLimitsModel.retryTime(until))")
-                                    .font(.system(size: Theme.ui(9.5), weight: .medium, design: .rounded))
-                                    .foregroundStyle(Theme.warning)
-                            } else if model.stale.contains(tool) {
+                            if model.stale.contains(tool), model.limits[tool] != nil {
                                 Text("unavailable")
                                     .font(.system(size: Theme.ui(9.5), weight: .medium, design: .rounded))
                                     .foregroundStyle(Theme.warning)
@@ -435,9 +311,11 @@ private struct UsageLimitsPopover: View {
                         let l = model.limits[tool]
                         bar("5-hour", l?.fiveHour, tint: tool.glowColor)
                         bar("Weekly", l?.weekly, tint: tool.glowColor)
-                        if l == nil, !(tool == .claude && model.claudeRateLimitedUntil != nil) {
+                        if l == nil {
                             Text(tool == .claude
-                                 ? "No reading yet — needs a Claude Code login."
+                                 ? (ClaudeUsageTap.isInstalled
+                                    ? "No reading yet — Claude Code reports limits after its first reply (Pro and Max plans)."
+                                    : "Turn on Settings ▸ Config ▸ Claude usage limits.")
                                  : "No reading yet — Codex logs limits after its first turn.")
                                 .font(.system(size: Theme.ui(9.5), design: .rounded))
                                 .foregroundStyle(Theme.textSecondary)
