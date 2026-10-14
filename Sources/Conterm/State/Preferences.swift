@@ -89,16 +89,31 @@ final class Preferences: ObservableObject {
     }
     /// Light vs dark glass tint. OFF (default) = dark glass, which the
     /// chrome's text colors are tuned for. ON = a light tint.
+    /// While following macOS this tracks the system; a write from any
+    /// other control (Tint, the palette toggle) snaps back to it.
     @Published var lightGlass: Bool {
-        didSet { ud.set(lightGlass, forKey: K.lightGlass) }
+        didSet {
+            if followSystemAppearance, lightGlass != Self.systemIsLight {
+                lightGlass = Self.systemIsLight
+                return
+            }
+            ud.set(lightGlass, forKey: K.lightGlass)
+        }
     }
     /// Follow macOS light/dark: drives `lightGlass` from the system, and
     /// `ThemeCatalog` swaps the terminal between `lightThemeID` and
     /// `darkThemeID` (a libghostty `theme = light:…,dark:…`).
     @Published var followSystemAppearance: Bool {
         didSet {
+            guard followSystemAppearance != oldValue else { return }
             ud.set(followSystemAppearance, forKey: K.followSystemAppearance)
-            syncLightGlassToSystem()
+            if followSystemAppearance {
+                // Remember the manual tint so turning this off restores it.
+                ud.set(lightGlass, forKey: K.manualLightGlass)
+                syncLightGlassToSystem()
+            } else if let manual = ud.object(forKey: K.manualLightGlass) as? Bool {
+                lightGlass = manual
+            }
         }
     }
     /// Picker theme ids for each appearance while following the system.
@@ -537,6 +552,7 @@ final class Preferences: ObservableObject {
         static let followSystemAppearance = "conterm.followSystemAppearance"
         static let lightThemeID     = "conterm.lightThemeID"
         static let darkThemeID      = "conterm.darkThemeID"
+        static let manualLightGlass = "conterm.manualLightGlass"
         static let solidGlass        = "conterm.solidGlass"   // pre-glassMode migration source
         static let glassMode         = "conterm.glassMode"
         static let interfaceStyle    = "conterm.interfaceStyle"

@@ -15,7 +15,6 @@ final class ThemeCatalog: ObservableObject {
         let accent: Color       // ANSI 4 (blue) — most themes' "accent" register
         let warn: Color         // ANSI 3 (yellow)
         let isDark: Bool
-        let path: String        // theme file; user themes shadow bundled ones
 
         // Equatable + Hashable on id alone — name + colors are derived.
         func hash(into hasher: inout Hasher) { hasher.combine(id) }
@@ -36,11 +35,22 @@ final class ThemeCatalog: ObservableObject {
     /// the launch animation (and tripping the OS launch watchdog on
     /// slower machines).
     init() {
-        current = UserConfigStore.managedThemeID() ?? UserConfigStore.read(key: "theme")
+        current = Self.storedSelection()
     }
 
     func reloadCurrent() {
-        current = UserConfigStore.managedThemeID() ?? UserConfigStore.read(key: "theme")
+        current = Self.storedSelection()
+    }
+
+    /// The managed block's theme id; for a `light | dark` pair, the one
+    /// macOS is showing now.
+    private static func storedSelection() -> String? {
+        guard let id = UserConfigStore.managedThemeID() else {
+            return UserConfigStore.read(key: "theme")
+        }
+        let pair = id.components(separatedBy: " | ")
+        guard pair.count == 2 else { return id }
+        return Preferences.systemIsLight ? pair[0] : pair[1]
     }
 
     /// Kick off a one-time background parse. Safe to call repeatedly
@@ -136,8 +146,7 @@ final class ThemeCatalog: ObservableObject {
             foreground: fg,
             accent: palette[4] ?? palette[12] ?? fg,
             warn: palette[3] ?? palette[11] ?? fg,
-            isDark: bg.luminance < 0.5,
-            path: path
+            isDark: bg.luminance < 0.5
         )
     }
 
@@ -145,40 +154,47 @@ final class ThemeCatalog: ObservableObject {
     /// block at the end of the user's config (so they override any
     /// hardcoded background/palette, including a `config-file`-included
     /// Ghostty config) and triggers a libghostty reload so it's live.
-    func apply(_ theme: Theme) {
-        let colors = Self.colorLines(forThemeID: theme.id)
+    func apply(_ theme: Theme) { apply(id: theme.id) }
+
+    private func apply(id: String) {
+        let colors = Self.colorLines(forThemeID: id)
         if colors.isEmpty {
             // Theme file unreadable — fall back to a bare key. Won't win
             // against hardcoded colors, but it's better than a silent no-op.
             UserConfigStore.write(key: "theme",
-                                   value: UserConfigStore.quote(theme.id))
+                                   value: UserConfigStore.quote(id))
         } else {
-            UserConfigStore.writeManagedThemeBlock(themeID: theme.id,
+            UserConfigStore.writeManagedThemeBlock(themeID: id,
                                                     colorLines: colors)
         }
-        current = theme.id
+        current = id
         Ghostty.App.shared?.reloadConfig()
     }
 
-    /// Follow macOS: one theme for Light mode, one for Dark. Written as a
-    /// libghostty `theme = light:…,dark:…` (see `themeRef`); Conterm pushes the system color scheme
-    /// so open panes switch live. Explicit colors elsewhere in the config
-    /// would shadow it, so those lines get commented out.
-    func applyPair(light: String, dark: String) {
-        guard let lp = Self.themeRef(light), let dp = Self.themeRef(dark) else { return }
+    /// Follow macOS: one theme for Light mode, one for Dark, written as a
+    /// libghostty `theme = light:…,dark:…` (see `themeRef`). Conterm pushes
+    /// the system color scheme, so open panes switch live. Explicit colors
+    /// elsewhere in the config would shadow it, so those lines get
+    /// commented out. False (nothing written) when either theme is missing.
+    @discardableResult
+    func applyPair(light: String, dark: String) -> Bool {
+        guard let lp = Self.themeRef(light), let dp = Self.themeRef(dark) else { return false }
         UserConfigStore.writeManagedThemeBlock(
             themeID: "\(light) | \(dark)",
             colorLines: ["theme = light:\(lp),dark:\(dp)"],
             disablingExplicitColors: true)
         current = Preferences.systemIsLight ? light : dark
         Ghostty.App.shared?.reloadConfig()
+        return true
     }
 
     /// How a pair names a theme: bundled ones by name (libghostty finds
     /// them in the app's resources wherever the app lives), user ones by
     /// absolute path (libghostty doesn't search ~/.config/conterm/themes).
+    /// nil for a missing theme, or a path with a comma, which would split
+    /// the `light:…,dark:…` value.
     nonisolated private static func themeRef(_ id: String) -> String? {
-        guard let path = path(forThemeID: id) else { return nil }
+        guard let path = path(forThemeID: id), !path.contains(",") else { return nil }
         let bundled = Bundle.main.resourceURL?.appendingPathComponent("ghostty/themes").path
         return bundled.map { path.hasPrefix($0 + "/") } == true ? id : path
     }
@@ -187,14 +203,18 @@ final class ThemeCatalog: ObservableObject {
     func setFollowSystem(_ on: Bool, prefs: Preferences) {
         if on {
             prefs.themeFromConfig = false
-            // Seed both slots from the current pick so the first toggle
-            // never blanks the terminal.
-            if prefs.lightThemeID == nil { prefs.lightThemeID = current }
-            if prefs.darkThemeID == nil { prefs.darkThemeID = current }
+            // Seed empty or stale slots from the current pick so the first
+            // toggle never blanks the terminal.
+            let seed = current.flatMap { Self.themeRef($0) == nil ? nil : $0 }
+            if prefs.lightThemeID.flatMap(Self.themeRef) == nil { prefs.lightThemeID = seed }
+            if prefs.darkThemeID.flatMap(Self.themeRef) == nil { prefs.darkThemeID = seed }
             applyPairIfComplete(prefs: prefs)
         } else if let id = Preferences.systemIsLight ? prefs.lightThemeID : prefs.darkThemeID,
-                  let theme = themes.first(where: { $0.id == id }) {
-            apply(theme)
+                  Self.path(forThemeID: id) != nil {
+            apply(id: id)
+        } else {
+            // No usable slot to fall back to: don't leave the pair active.
+            followConfig()
         }
     }
 
@@ -202,8 +222,12 @@ final class ThemeCatalog: ObservableObject {
     /// following macOS.
     func pick(_ theme: Theme, editingLight: Bool, prefs: Preferences) {
         guard prefs.followSystemAppearance else { return apply(theme) }
+        let previous = editingLight ? prefs.lightThemeID : prefs.darkThemeID
         if editingLight { prefs.lightThemeID = theme.id } else { prefs.darkThemeID = theme.id }
-        applyPairIfComplete(prefs: prefs)
+        // A theme the pair can't reference (see `themeRef`) doesn't take the slot.
+        if !applyPairIfComplete(prefs: prefs), Self.themeRef(theme.id) == nil {
+            if editingLight { prefs.lightThemeID = previous } else { prefs.darkThemeID = previous }
+        }
     }
 
     /// The swatch to ring: the edited slot while following macOS.
@@ -212,9 +236,10 @@ final class ThemeCatalog: ObservableObject {
         return editingLight ? prefs.lightThemeID : prefs.darkThemeID
     }
 
-    private func applyPairIfComplete(prefs: Preferences) {
-        guard let light = prefs.lightThemeID, let dark = prefs.darkThemeID else { return }
-        applyPair(light: light, dark: dark)
+    @discardableResult
+    private func applyPairIfComplete(prefs: Preferences) -> Bool {
+        guard let light = prefs.lightThemeID, let dark = prefs.darkThemeID else { return false }
+        return applyPair(light: light, dark: dark)
     }
 
     /// Re-point `current` after macOS switches, so the picker's selection
