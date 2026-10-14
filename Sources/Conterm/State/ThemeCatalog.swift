@@ -35,11 +35,22 @@ final class ThemeCatalog: ObservableObject {
     /// the launch animation (and tripping the OS launch watchdog on
     /// slower machines).
     init() {
-        current = UserConfigStore.managedThemeID() ?? UserConfigStore.read(key: "theme")
+        current = Self.storedSelection()
     }
 
     func reloadCurrent() {
-        current = UserConfigStore.managedThemeID() ?? UserConfigStore.read(key: "theme")
+        current = Self.storedSelection()
+    }
+
+    /// The managed block's theme id; for a `light | dark` pair, the one
+    /// macOS is showing now.
+    private static func storedSelection() -> String? {
+        guard let id = UserConfigStore.managedThemeID() else {
+            return UserConfigStore.read(key: "theme")
+        }
+        let pair = id.components(separatedBy: " | ")
+        guard pair.count == 2 else { return id }
+        return Preferences.systemIsLight ? pair[0] : pair[1]
     }
 
     /// Kick off a one-time background parse. Safe to call repeatedly
@@ -49,9 +60,9 @@ final class ThemeCatalog: ObservableObject {
         guard !didStartLoad else { return }
         didStartLoad = true
         isLoading = true
-        let dir = themesDirectoryURL()
+        let dirs = Self.themeDirectories()
         Task.detached(priority: .userInitiated) {
-            let parsed = Self.parseAll(in: dir)
+            let parsed = Self.parseAll(in: dirs)
             await MainActor.run {
                 self.themes = parsed
                 self.isLoading = false
@@ -62,28 +73,40 @@ final class ThemeCatalog: ObservableObject {
     /// Pure, off-main parse of every theme file in `dir`. `nonisolated`
     /// + `static` so it can run on a background executor without
     /// touching `self`'s main-actor state.
-    nonisolated private static func parseAll(in dir: URL?) -> [Theme] {
-        guard let dir else { return [] }
+    nonisolated private static func parseAll(in dirs: [URL]) -> [Theme] {
         let fm = FileManager.default
-        let names = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
-        var loaded: [Theme] = []
-        for name in names {
-            if name.hasPrefix(".") || name.hasSuffix(".md") { continue }
-            let path = dir.appendingPathComponent(name).path
-            guard let theme = parse(path: path, name: name) else { continue }
-            loaded.append(theme)
+        var byID: [String: Theme] = [:]
+        // Later directories win, so a user theme shadows a bundled one.
+        for dir in dirs {
+            let names = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+            for name in names {
+                if name.hasPrefix(".") || name.hasSuffix(".md") { continue }
+                let path = dir.appendingPathComponent(name).path
+                guard let theme = parse(path: path, name: name) else { continue }
+                byID[name] = theme
+            }
         }
+        var loaded = Array(byID.values)
         loaded.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         return loaded
     }
 
-    nonisolated private func themesDirectoryURL() -> URL? {
-        if let url = Bundle.main.resourceURL?
-            .appendingPathComponent("ghostty/themes"),
-           FileManager.default.fileExists(atPath: url.path) {
-            return url
+    /// Bundled libghostty themes, then the user's own in
+    /// `~/.config/conterm/themes` (Ghostty theme-file syntax).
+    nonisolated static func themeDirectories() -> [URL] {
+        var dirs: [URL] = []
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("ghostty/themes") {
+            dirs.append(bundled)
         }
-        return nil
+        dirs.append(URL(fileURLWithPath: InstanceState.configPath("themes"), isDirectory: true))
+        return dirs.filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// The file behind a theme id, user directory first.
+    nonisolated static func path(forThemeID id: String) -> String? {
+        themeDirectories().reversed()
+            .map { $0.appendingPathComponent(id).path }
+            .first { FileManager.default.fileExists(atPath: $0) }
     }
 
     nonisolated private static func parse(path: String, name: String) -> Theme? {
@@ -131,19 +154,99 @@ final class ThemeCatalog: ObservableObject {
     /// block at the end of the user's config (so they override any
     /// hardcoded background/palette, including a `config-file`-included
     /// Ghostty config) and triggers a libghostty reload so it's live.
-    func apply(_ theme: Theme) {
-        let colors = Self.colorLines(forThemeID: theme.id)
+    func apply(_ theme: Theme) { apply(id: theme.id) }
+
+    private func apply(id: String) {
+        let colors = Self.colorLines(forThemeID: id)
         if colors.isEmpty {
             // Theme file unreadable — fall back to a bare key. Won't win
             // against hardcoded colors, but it's better than a silent no-op.
             UserConfigStore.write(key: "theme",
-                                   value: UserConfigStore.quote(theme.id))
+                                   value: UserConfigStore.quote(id))
         } else {
-            UserConfigStore.writeManagedThemeBlock(themeID: theme.id,
+            UserConfigStore.writeManagedThemeBlock(themeID: id,
                                                     colorLines: colors)
         }
-        current = theme.id
+        current = id
         Ghostty.App.shared?.reloadConfig()
+    }
+
+    /// Follow macOS: one theme for Light mode, one for Dark, written as a
+    /// libghostty `theme = light:…,dark:…` (see `themeRef`). Conterm pushes
+    /// the system color scheme, so open panes switch live. Explicit colors
+    /// elsewhere in the config would shadow it, so those lines get
+    /// commented out. False (nothing written) when either theme is missing.
+    @discardableResult
+    func applyPair(light: String, dark: String) -> Bool {
+        guard let lp = Self.themeRef(light), let dp = Self.themeRef(dark) else { return false }
+        UserConfigStore.writeManagedThemeBlock(
+            themeID: "\(light) | \(dark)",
+            colorLines: ["theme = light:\(lp),dark:\(dp)"],
+            disablingExplicitColors: true)
+        current = Preferences.systemIsLight ? light : dark
+        Ghostty.App.shared?.reloadConfig()
+        return true
+    }
+
+    /// How a pair names a theme: bundled ones by name (libghostty finds
+    /// them in the app's resources wherever the app lives), user ones by
+    /// absolute path (libghostty doesn't search ~/.config/conterm/themes).
+    /// nil for a missing theme, or a path with a comma, which would split
+    /// the `light:…,dark:…` value.
+    nonisolated private static func themeRef(_ id: String) -> String? {
+        guard let path = path(forThemeID: id), !path.contains(",") else { return nil }
+        let bundled = Bundle.main.resourceURL?.appendingPathComponent("ghostty/themes").path
+        return bundled.map { path.hasPrefix($0 + "/") } == true ? id : path
+    }
+
+    /// The follow-macOS switch flipped (either Settings look calls this).
+    func setFollowSystem(_ on: Bool, prefs: Preferences) {
+        if on {
+            prefs.themeFromConfig = false
+            // Seed empty or stale slots from the current pick so the first
+            // toggle never blanks the terminal.
+            let seed = current.flatMap { Self.themeRef($0) == nil ? nil : $0 }
+            if prefs.lightThemeID.flatMap(Self.themeRef) == nil { prefs.lightThemeID = seed }
+            if prefs.darkThemeID.flatMap(Self.themeRef) == nil { prefs.darkThemeID = seed }
+            applyPairIfComplete(prefs: prefs)
+        } else if let id = Preferences.systemIsLight ? prefs.lightThemeID : prefs.darkThemeID,
+                  Self.path(forThemeID: id) != nil {
+            apply(id: id)
+        } else {
+            // No usable slot to fall back to: don't leave the pair active.
+            followConfig()
+        }
+    }
+
+    /// A swatch tap: a single theme, or the slot being edited while
+    /// following macOS.
+    func pick(_ theme: Theme, editingLight: Bool, prefs: Preferences) {
+        guard prefs.followSystemAppearance else { return apply(theme) }
+        let previous = editingLight ? prefs.lightThemeID : prefs.darkThemeID
+        if editingLight { prefs.lightThemeID = theme.id } else { prefs.darkThemeID = theme.id }
+        // A theme the pair can't reference (see `themeRef`) doesn't take the slot.
+        if !applyPairIfComplete(prefs: prefs), Self.themeRef(theme.id) == nil {
+            if editingLight { prefs.lightThemeID = previous } else { prefs.darkThemeID = previous }
+        }
+    }
+
+    /// The swatch to ring: the edited slot while following macOS.
+    func selectedID(editingLight: Bool, prefs: Preferences) -> String? {
+        guard prefs.followSystemAppearance else { return current }
+        return editingLight ? prefs.lightThemeID : prefs.darkThemeID
+    }
+
+    @discardableResult
+    private func applyPairIfComplete(prefs: Preferences) -> Bool {
+        guard let light = prefs.lightThemeID, let dark = prefs.darkThemeID else { return false }
+        return applyPair(light: light, dark: dark)
+    }
+
+    /// Re-point `current` after macOS switches, so the picker's selection
+    /// tracks the theme on screen.
+    func refreshPairSelection(prefs: Preferences) {
+        guard prefs.followSystemAppearance else { return }
+        current = Preferences.systemIsLight ? prefs.lightThemeID : prefs.darkThemeID
     }
 
     /// Hand color control back to the user's own config: remove the
@@ -160,10 +263,8 @@ final class ThemeCatalog: ObservableObject {
     /// can't set anyway). Emitted into the user config so the theme's
     /// colors land as explicit keys that override a hardcoded palette.
     nonisolated private static func colorLines(forThemeID id: String) -> [String] {
-        guard let dir = Bundle.main.resourceURL?
-            .appendingPathComponent("ghostty/themes") else { return [] }
-        let path = dir.appendingPathComponent(id).path
-        guard let body = try? String(contentsOfFile: path, encoding: .utf8) else {
+        guard let path = path(forThemeID: id),
+              let body = try? String(contentsOfFile: path, encoding: .utf8) else {
             return []
         }
         var out: [String] = []
