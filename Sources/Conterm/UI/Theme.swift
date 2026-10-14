@@ -66,20 +66,24 @@ enum Theme {
         dark:  NSColor(white: 1.0, alpha: 0.14))
     static let highlight     = Color(red: 0.85, green: 0.95, blue: 1.00)
 
-    /// Non-adaptive accent for chrome that floats over the dark terminal
-    /// in BOTH appearances (pane title pill, suggestion strip). The
-    /// regular `accent` flips near-black in light mode and would vanish
-    /// against the dark bed — this stays the cool near-white.
+    /// Non-adaptive cool near-white for chrome that stays dark in both
+    /// appearances (the suggestion strip). The regular `accent` flips
+    /// near-black in light mode and would vanish on a dark bed.
     static let accentOnDark  = Color(red: 0.92, green: 0.96, blue: 1.00)
     /// Ink on the pane chips (title pill, badges, close button): white on
     /// the dark chip bed, cool near-black once a light tint lightens it.
     static let onChip        = dynamic(
         light: NSColor(calibratedRed: 0.10, green: 0.12, blue: 0.16, alpha: 1),
         dark:  .white)
+    /// `onChip`'s accent: the cool near-white (`accentOnDark`) on the dark
+    /// bed, the same ink as `onChip` on the light one.
+    static let onChipAccent  = dynamic(
+        light: NSColor(calibratedRed: 0.10, green: 0.12, blue: 0.16, alpha: 1),
+        dark:  NSColor(calibratedRed: 0.92, green: 0.96, blue: 1.00, alpha: 1))
     /// Pale amber on dark glass; a deeper amber under a light tint, where
     /// the pale one washes out.
     static let warning       = dynamic(
-        light: NSColor(calibratedRed: 0.78, green: 0.42, blue: 0.02, alpha: 1),
+        light: NSColor(calibratedRed: 0.66, green: 0.34, blue: 0.00, alpha: 1),
         dark:  NSColor(calibratedRed: 1.00, green: 0.80, blue: 0.55, alpha: 1))
 
     static let textPrimary   = dynamic(

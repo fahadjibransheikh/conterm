@@ -123,7 +123,7 @@ struct AgentPill: View {
 
     @ViewBuilder
     private var mark: some View {
-        // Pinned light for the same reason as the label — see `body`.
+        // Follows the bed like the label — see `body`.
         let tint = (working || attention) ? glowColor : PanePill.ink.opacity(0.6)
         let templated = status.tool.markIsTemplate
         // Cached decode: `mark` re-evaluates every frame while the sweep

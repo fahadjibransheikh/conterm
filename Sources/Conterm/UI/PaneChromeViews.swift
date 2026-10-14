@@ -94,7 +94,7 @@ struct PaneTitleBar: View {
         if remoteHost != nil {
             return isActive ? Theme.sshAccent : Theme.sshAccent.opacity(0.55)
         }
-        return isActive ? Theme.onChip : Theme.onChip.opacity(0.35)
+        return isActive ? Theme.onChipAccent : Theme.onChip.opacity(0.35)
     }
 
     var body: some View {
@@ -296,7 +296,7 @@ private struct KeybindChip: View {
             .font(.system(size: 11, weight: .semibold, design: .rounded))
             .foregroundStyle(light
                 ? Color.black.opacity(0.7)
-                : (isActive ? Theme.onChip : Theme.onChip.opacity(0.55)))
+                : (isActive ? Theme.onChipAccent : Theme.onChip.opacity(0.55)))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(

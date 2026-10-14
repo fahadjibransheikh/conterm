@@ -129,7 +129,7 @@ struct ClassicAgentPill: View {
 
     @ViewBuilder
     private var mark: some View {
-        // Pinned light for the same reason as the label — see `body`.
+        // Follows the bed like the label — see `body`.
         let tint = (working || attention) ? glowColor : PanePill.ink.opacity(0.6)
         let templated = status.tool.markIsTemplate
         // Cached decode: `mark` re-evaluates every frame while the sweep
@@ -250,8 +250,7 @@ struct ClassicAgentToolBubble: View {
     private var color: Color { run.kind.color }
     private static let failColor = Color(red: 1.0, green: 0.42, blue: 0.42)
     private static let bed = PanePill.bed
-    /// Pinned light like the pill's label: the bubble floats over the dark
-    /// terminal in both appearances.
+    /// Follows the bed, like the pill's label.
     private static let ink = PanePill.ink
 
     private var sweeps: Bool {
