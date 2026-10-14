@@ -17,6 +17,7 @@ struct SettingsPanel: View {
     // would repeat a settings.json read + parse on the main thread. Config
     // isn't the default section, so the initial `false` is never shown.
     @State private var claudeIntegrationOn = false
+    @State private var claudeUsageTapOn = false
     @State private var codexIntegrationOn = false
     @State private var codexAwaitsTrust = false
     @State private var openCodeIntegrationOn = false
@@ -78,6 +79,7 @@ struct SettingsPanel: View {
             // One disk read per panel-open for the integration toggles
             // (see the @State declarations above).
             claudeIntegrationOn = ClaudeIntegration.isInstalled
+            claudeUsageTapOn = ClaudeUsageTap.isInstalled
             codexIntegrationOn = CodexIntegration.isInstalled
             codexAwaitsTrust = CodexIntegration.awaitsTrust
             openCodeIntegrationOn = OpenCodeIntegration.isInstalled
@@ -841,6 +843,19 @@ struct SettingsPanel: View {
                             if on { ClaudeIntegration.install() }
                             else  { ClaudeIntegration.uninstall() }
                             claudeIntegrationOn = ClaudeIntegration.isInstalled
+                        }
+                    ).withSound())
+                    .toggleStyle(.drop)
+                    .labelsHidden()
+                }
+                SettingsRow(title: "Claude usage limits",
+                            subtitle: "Feed the usage-limits widget from the data Claude Code gives its status line (5-hour and weekly, Pro and Max plans). Wraps your status line command in ~/.claude/settings.json; it looks the same, and turning this off restores it.") {
+                    Toggle("", isOn: Binding(
+                        get: { claudeUsageTapOn },
+                        set: { on in
+                            if on { ClaudeUsageTap.install() }
+                            else  { ClaudeUsageTap.uninstall() }
+                            claudeUsageTapOn = ClaudeUsageTap.isInstalled
                         }
                     ).withSound())
                     .toggleStyle(.drop)
