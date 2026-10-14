@@ -228,6 +228,8 @@ extension Ghostty {
             self.handle = s
             self.userdataPtr = boxPtr
             SurfaceRegistry.register(self)
+            // A new surface starts in the default (light) conditional state,
+            // not the app's, so `theme = light:…,dark:…` needs the scheme here.
             ghostty_surface_set_color_scheme(s, App.systemColorScheme)
 
             // libghostty initializes the surface with the cfg's

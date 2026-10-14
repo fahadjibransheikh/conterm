@@ -110,7 +110,8 @@ fi
 # runtime network; Ghostty publishes no canonical default-config URL —
 # the binary is the source of truth).
 GHOSTTY_BIN="/Applications/Ghostty.app/Contents/MacOS/ghostty"
-THEME_KEYS_RE='^(background|foreground|palette|cursor-color|cursor-text|selection-background|selection-foreground|minimum-contrast) ='
+# Keys a theme file may set (colors and contrast). See the filter below.
+THEME_KEYS_RE='^(background|foreground|palette|cursor-color|cursor-text|selection-background|selection-foreground|minimum-contrast|bold-color|split-divider-color|unfocused-split-fill|window-titlebar-background|window-titlebar-foreground|search-foreground|search-background|search-selected-foreground|search-selected-background) ='
 if [[ -x "$GHOSTTY_BIN" ]]; then
     _gd_tmp="$(mktemp)"
     "$GHOSTTY_BIN" +show-config --default > "$_gd_tmp"
@@ -118,13 +119,15 @@ if [[ -x "$GHOSTTY_BIN" ]]; then
         printf '%s\n' \
             "# Ghostty's genuine default configuration — auto-generated" \
             "# by scripts/setup.sh via: ghostty +show-config --default" \
-            "# libghostty's compiled-in defaults, NOT a personal config." \
+            "# libghostty's compiled-in defaults, NOT a personal config," \
+            "# minus the keys a theme sets (see THEME_KEYS_RE)." \
             "# Do not edit; regenerated on every setup." \
             "#"
-        # Drop the keys a theme sets (colors, minimum-contrast). libghostty applies `theme`
-        # first and then replays every loaded line over it, so explicit
-        # defaults here would shadow any user `theme =`. Their values are
-        # the compiled-in defaults, so omitting them changes nothing else.
+        # Drop the keys a theme sets. libghostty applies `theme` first
+        # and then replays every loaded line over it, so explicit
+        # defaults here would shadow any user `theme =`. Their values
+        # are the compiled-in defaults, so omitting them changes
+        # nothing else.
         grep -vE "$THEME_KEYS_RE" "$_gd_tmp"
     } > Resources/ghostty-default.conf
     rm -f "$_gd_tmp"
