@@ -1491,9 +1491,12 @@ private struct ThemePicker: View {
                             ForEach(filteredThemes, id: \.id) { theme in
                                 ThemeSwatch(
                                     theme: theme,
-                                    isSelected: theme.id == selectedID
+                                    isSelected: theme.id == themes.selectedID(
+                                        editingLight: editingLight, prefs: prefs)
                                 )
-                                .onTapGesture { pick(theme) }
+                                .onTapGesture {
+                                    themes.pick(theme, editingLight: editingLight, prefs: prefs)
+                                }
                             }
                         }
                         .padding(.vertical, 4)
@@ -1579,37 +1582,9 @@ private struct ThemePicker: View {
                 .strokeBorder(Theme.stroke, lineWidth: 0.5)
         )
         .onChange(of: prefs.followSystemAppearance) { _, on in
-            if on {
-                prefs.themeFromConfig = false
-                // Seed both slots from the current pick so the first
-                // toggle never blanks the terminal.
-                let seed = themes.current
-                if prefs.lightThemeID == nil { prefs.lightThemeID = seed }
-                if prefs.darkThemeID == nil { prefs.darkThemeID = seed }
-                applyPairIfComplete()
-            } else if let id = Preferences.systemIsLight ? prefs.lightThemeID : prefs.darkThemeID,
-                      let theme = themes.themes.first(where: { $0.id == id }) {
-                themes.apply(theme)
-            }
+            themes.setFollowSystem(on, prefs: prefs)
         }
         .onChange(of: prefs.lightGlass) { _, _ in themes.refreshPairSelection(prefs: prefs) }
-    }
-
-    /// The swatch to ring: the slot being edited while following macOS.
-    private var selectedID: String? {
-        guard prefs.followSystemAppearance else { return themes.current }
-        return editingLight ? prefs.lightThemeID : prefs.darkThemeID
-    }
-
-    private func pick(_ theme: ThemeCatalog.Theme) {
-        guard prefs.followSystemAppearance else { return themes.apply(theme) }
-        if editingLight { prefs.lightThemeID = theme.id } else { prefs.darkThemeID = theme.id }
-        applyPairIfComplete()
-    }
-
-    private func applyPairIfComplete() {
-        guard let light = prefs.lightThemeID, let dark = prefs.darkThemeID else { return }
-        themes.applyPair(light: light, dark: dark)
     }
 
     private var filteredThemes: [ThemeCatalog.Theme] {

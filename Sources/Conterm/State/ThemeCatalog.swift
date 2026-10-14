@@ -183,6 +183,40 @@ final class ThemeCatalog: ObservableObject {
         return bundled.map { path.hasPrefix($0 + "/") } == true ? id : path
     }
 
+    /// The follow-macOS switch flipped (either Settings look calls this).
+    func setFollowSystem(_ on: Bool, prefs: Preferences) {
+        if on {
+            prefs.themeFromConfig = false
+            // Seed both slots from the current pick so the first toggle
+            // never blanks the terminal.
+            if prefs.lightThemeID == nil { prefs.lightThemeID = current }
+            if prefs.darkThemeID == nil { prefs.darkThemeID = current }
+            applyPairIfComplete(prefs: prefs)
+        } else if let id = Preferences.systemIsLight ? prefs.lightThemeID : prefs.darkThemeID,
+                  let theme = themes.first(where: { $0.id == id }) {
+            apply(theme)
+        }
+    }
+
+    /// A swatch tap: a single theme, or the slot being edited while
+    /// following macOS.
+    func pick(_ theme: Theme, editingLight: Bool, prefs: Preferences) {
+        guard prefs.followSystemAppearance else { return apply(theme) }
+        if editingLight { prefs.lightThemeID = theme.id } else { prefs.darkThemeID = theme.id }
+        applyPairIfComplete(prefs: prefs)
+    }
+
+    /// The swatch to ring: the edited slot while following macOS.
+    func selectedID(editingLight: Bool, prefs: Preferences) -> String? {
+        guard prefs.followSystemAppearance else { return current }
+        return editingLight ? prefs.lightThemeID : prefs.darkThemeID
+    }
+
+    private func applyPairIfComplete(prefs: Preferences) {
+        guard let light = prefs.lightThemeID, let dark = prefs.darkThemeID else { return }
+        applyPair(light: light, dark: dark)
+    }
+
     /// Re-point `current` after macOS switches, so the picker's selection
     /// tracks the theme on screen.
     func refreshPairSelection(prefs: Preferences) {
