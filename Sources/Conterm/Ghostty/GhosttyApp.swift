@@ -278,14 +278,10 @@ extension Ghostty {
             guard let newCfg = ghostty_config_new() else { return }
             App.applyConfigChain(newCfg)
             ghostty_config_finalize(newCfg)
+            // Reaches every live surface too: libghostty's App.updateConfig
+            // sends each one `change_config`, which runs the same
+            // Surface.updateConfig as `ghostty_surface_update_config`.
             ghostty_app_update_config(handle, newCfg)
-            // Push to every surface so live panes pick up the new
-            // colors/font without a relaunch.
-            for ctrl in SurfaceRegistry.allControllers() {
-                if let h = ctrl.handle {
-                    ghostty_surface_update_config(h, newCfg)
-                }
-            }
             inheritWorkingDirectory = App.readInheritWorkingDirectory(newCfg)
             // Free the ephemeral config — both app + surfaces have
             // copied what they need internally.
