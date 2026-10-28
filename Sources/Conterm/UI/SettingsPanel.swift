@@ -1581,10 +1581,6 @@ private struct ThemePicker: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .strokeBorder(Theme.stroke, lineWidth: 0.5)
         )
-        .onChange(of: prefs.followSystemAppearance) { _, on in
-            themes.setFollowSystem(on, prefs: prefs)
-        }
-        .onChange(of: prefs.lightGlass) { _, _ in themes.refreshPairSelection(prefs: prefs) }
     }
 
     private var filteredThemes: [ThemeCatalog.Theme] {

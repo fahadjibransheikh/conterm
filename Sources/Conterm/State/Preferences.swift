@@ -101,8 +101,8 @@ final class Preferences: ObservableObject {
         }
     }
     /// Follow macOS light/dark: drives `lightGlass` from the system, and
-    /// `ThemeCatalog` swaps the terminal between `lightThemeID` and
-    /// `darkThemeID` (a libghostty `theme = light:…,dark:…`).
+    /// `ThemeCatalog` rewrites the theme block with `lightThemeID` or
+    /// `darkThemeID` whenever macOS switches.
     @Published var followSystemAppearance: Bool {
         didSet {
             guard followSystemAppearance != oldValue else { return }
@@ -123,8 +123,6 @@ final class Preferences: ObservableObject {
     @Published var darkThemeID: String? {
         didSet { ud.set(darkThemeID, forKey: K.darkThemeID) }
     }
-    private var appearanceObservation: NSKeyValueObservation?
-
     /// True when macOS is in Light mode. Read from NSApp, not a window:
     /// Conterm pins its windows' appearance to the glass tint.
     static var systemIsLight: Bool {
@@ -132,7 +130,9 @@ final class Preferences: ObservableObject {
         NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) != .darkAqua
     }
 
-    private func syncLightGlassToSystem() {
+    /// Called at launch and, through `ThemeCatalog.bind`, on every macOS
+    /// appearance change.
+    func syncLightGlassToSystem() {
         guard followSystemAppearance else { return }
         let light = Self.systemIsLight
         if lightGlass != light { lightGlass = light }
@@ -728,9 +728,6 @@ final class Preferences: ObservableObject {
         self.diagnosticLogging      = ud.object(forKey: K.diagnosticLogging) as? Bool ?? false
         refreshPaneBlurFromConfig()
         syncLightGlassToSystem()
-        appearanceObservation = NSApp?.observe(\.effectiveAppearance) { [weak self] _, _ in
-            Task { @MainActor in self?.syncLightGlassToSystem() }
-        }
         // `didSet` doesn't fire during init, so the services these settings
         // drive are handed their values once here.
         Briefing.shared.enabled = briefingEnabled

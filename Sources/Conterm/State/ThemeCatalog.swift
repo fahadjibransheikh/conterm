@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 
@@ -35,22 +36,37 @@ final class ThemeCatalog: ObservableObject {
     /// the launch animation (and tripping the OS launch watchdog on
     /// slower machines).
     init() {
-        current = Self.storedSelection()
+        current = UserConfigStore.managedThemeID() ?? UserConfigStore.read(key: "theme")
     }
 
     func reloadCurrent() {
-        current = Self.storedSelection()
+        current = UserConfigStore.managedThemeID() ?? UserConfigStore.read(key: "theme")
     }
 
-    /// The managed block's theme id; for a `light | dark` pair, the one
-    /// macOS is showing now.
-    private static func storedSelection() -> String? {
-        guard let id = UserConfigStore.managedThemeID() else {
-            return UserConfigStore.read(key: "theme")
+    private weak var prefs: Preferences?
+    private var appearanceObservation: NSKeyValueObservation?
+    private var followObservation: AnyCancellable?
+
+    /// Wire follow-system mode once, at launch, so it works while Settings
+    /// is closed. Both hops go through the main queue: `@Published` fires
+    /// before the new value is stored, and Preferences' own `didSet` (which
+    /// saves or restores the manual tint) must run first.
+    func bind(_ prefs: Preferences) {
+        self.prefs = prefs
+        followObservation = prefs.$followSystemAppearance
+            .dropFirst().removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] on in
+                MainActor.assumeIsolated { self?.setFollowSystem(on) }
+            }
+        appearanceObservation = NSApp?.observe(\.effectiveAppearance) { [weak self] _, _ in
+            Task { @MainActor in
+                self?.prefs?.syncLightGlassToSystem()
+                self?.applyFollowedSlot()
+            }
         }
-        let pair = id.components(separatedBy: " | ")
-        guard pair.count == 2 else { return id }
-        return Preferences.systemIsLight ? pair[0] : pair[1]
+        // macOS may have switched while Conterm wasn't running.
+        applyFollowedSlot()
     }
 
     /// Kick off a one-time background parse. Safe to call repeatedly
@@ -156,7 +172,7 @@ final class ThemeCatalog: ObservableObject {
     /// Ghostty config) and triggers a libghostty reload so it's live.
     func apply(_ theme: Theme) { apply(id: theme.id) }
 
-    private func apply(id: String) {
+    func apply(id: String) {
         let colors = Self.colorLines(forThemeID: id)
         if colors.isEmpty {
             // Theme file unreadable — fall back to a bare key. Won't win
@@ -171,82 +187,62 @@ final class ThemeCatalog: ObservableObject {
         Ghostty.App.shared?.reloadConfig()
     }
 
-    /// Follow macOS: one theme for Light mode, one for Dark, written as a
-    /// libghostty `theme = light:…,dark:…` (see `themeRef`). Conterm pushes
-    /// the system color scheme, so open panes switch live. Explicit colors
-    /// elsewhere in the config would shadow it, so those lines get
-    /// commented out. False (nothing written) when either theme is missing.
-    @discardableResult
-    func applyPair(light: String, dark: String) -> Bool {
-        guard let lp = Self.themeRef(light), let dp = Self.themeRef(dark) else { return false }
-        UserConfigStore.writeManagedThemeBlock(
-            themeID: "\(light) | \(dark)",
-            colorLines: ["theme = light:\(lp),dark:\(dp)"],
-            disablingExplicitColors: true)
-        current = Preferences.systemIsLight ? light : dark
-        Ghostty.App.shared?.reloadConfig()
-        return true
+    /// The slot to write for an appearance, or nil to leave the block
+    /// alone: the user's config owns the colors, the slot is empty, or
+    /// it's already the applied theme.
+    nonisolated static func slotToApply(fromConfig: Bool, light: String?, dark: String?,
+                                        lightAppearance: Bool, current: String?) -> String? {
+        guard !fromConfig, let id = lightAppearance ? light : dark, id != current else { return nil }
+        return id
     }
 
-    /// How a pair names a theme: bundled ones by name (libghostty finds
-    /// them in the app's resources wherever the app lives), user ones by
-    /// absolute path (libghostty doesn't search ~/.config/conterm/themes).
-    /// nil for a missing theme, or a path with a comma, which would split
-    /// the `light:…,dark:…` value.
-    nonisolated private static func themeRef(_ id: String) -> String? {
-        guard let path = path(forThemeID: id), !path.contains(",") else { return nil }
-        let bundled = Bundle.main.resourceURL?.appendingPathComponent("ghostty/themes").path
-        return bundled.map { path.hasPrefix($0 + "/") } == true ? id : path
+    /// While following macOS, write the slot for the current appearance as
+    /// the usual explicit-color block. Skipped when the user's config owns
+    /// the colors, the slot is empty or missing, or it's already applied.
+    func applyFollowedSlot() {
+        guard let prefs, prefs.followSystemAppearance else { return }
+        applySlot(lightAppearance: Preferences.systemIsLight, prefs: prefs)
     }
 
-    /// The follow-macOS switch flipped (either Settings look calls this).
-    func setFollowSystem(_ on: Bool, prefs: Preferences) {
+    private func applySlot(lightAppearance: Bool, prefs: Preferences) {
+        guard let id = Self.slotToApply(fromConfig: prefs.themeFromConfig,
+                                        light: prefs.lightThemeID, dark: prefs.darkThemeID,
+                                        lightAppearance: lightAppearance, current: current),
+              Self.path(forThemeID: id) != nil else { return }
+        apply(id: id)
+    }
+
+    /// The follow-macOS switch flipped. Runs after Preferences has synced
+    /// (on) or restored (off) the glass tint; see `bind`.
+    private func setFollowSystem(_ on: Bool) {
+        guard let prefs else { return }
         if on {
             prefs.themeFromConfig = false
             // Seed empty or stale slots from the current pick so the first
             // toggle never blanks the terminal.
-            let seed = current.flatMap { Self.themeRef($0) == nil ? nil : $0 }
-            if prefs.lightThemeID.flatMap(Self.themeRef) == nil { prefs.lightThemeID = seed }
-            if prefs.darkThemeID.flatMap(Self.themeRef) == nil { prefs.darkThemeID = seed }
-            applyPairIfComplete(prefs: prefs)
-        } else if let id = Preferences.systemIsLight ? prefs.lightThemeID : prefs.darkThemeID,
-                  Self.path(forThemeID: id) != nil {
-            apply(id: id)
+            let seed = current.flatMap { Self.path(forThemeID: $0) == nil ? nil : $0 }
+            if prefs.lightThemeID.flatMap(Self.path(forThemeID:)) == nil { prefs.lightThemeID = seed }
+            if prefs.darkThemeID.flatMap(Self.path(forThemeID:)) == nil { prefs.darkThemeID = seed }
+            applyFollowedSlot()
         } else {
-            // No usable slot to fall back to: don't leave the pair active.
-            followConfig()
+            // Keep the terminal in step with the restored manual tint.
+            applySlot(lightAppearance: prefs.lightGlass, prefs: prefs)
         }
     }
 
     /// A swatch tap: a single theme, or the slot being edited while
-    /// following macOS.
+    /// following macOS. The slot for the appearance on screen applies now;
+    /// the other one applies when macOS switches.
     func pick(_ theme: Theme, editingLight: Bool, prefs: Preferences) {
         guard prefs.followSystemAppearance else { return apply(theme) }
-        let previous = editingLight ? prefs.lightThemeID : prefs.darkThemeID
         if editingLight { prefs.lightThemeID = theme.id } else { prefs.darkThemeID = theme.id }
-        // A theme the pair can't reference (see `themeRef`) doesn't take the slot.
-        if !applyPairIfComplete(prefs: prefs), Self.themeRef(theme.id) == nil {
-            if editingLight { prefs.lightThemeID = previous } else { prefs.darkThemeID = previous }
-        }
+        applyFollowedSlot()
     }
 
     /// The swatch to ring: the edited slot while following macOS.
     func selectedID(editingLight: Bool, prefs: Preferences) -> String? {
         guard prefs.followSystemAppearance else { return current }
         return editingLight ? prefs.lightThemeID : prefs.darkThemeID
-    }
-
-    @discardableResult
-    private func applyPairIfComplete(prefs: Preferences) -> Bool {
-        guard let light = prefs.lightThemeID, let dark = prefs.darkThemeID else { return false }
-        return applyPair(light: light, dark: dark)
-    }
-
-    /// Re-point `current` after macOS switches, so the picker's selection
-    /// tracks the theme on screen.
-    func refreshPairSelection(prefs: Preferences) {
-        guard prefs.followSystemAppearance else { return }
-        current = Preferences.systemIsLight ? prefs.lightThemeID : prefs.darkThemeID
     }
 
     /// Hand color control back to the user's own config: remove the
