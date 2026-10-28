@@ -36,7 +36,7 @@ enum WidgetKind: String, CaseIterable, Identifiable {
         case .systemStats:  return "CPU, memory, and network."
         case .clock:        return "Time, optionally date and seconds."
         case .battery:      return "Charge, charging state, time left."
-        case .gitStatus:    return "Branch + dirty/ahead/behind for the active pane's repo."
+        case .gitStatus:    return "Repo name, branch + dirty/ahead/behind for the active pane's repo."
         case .notes:        return "Note count at a glance; click to capture and edit."
         case .ping:         return "Latency to 8.8.8.8 with a small history graph."
         case .sessionStats: return "Commands today, top command, and your day streak."
@@ -677,11 +677,11 @@ final class GitStatusModel: ObservableObject {
     nonisolated private static func compute(cwd: String) -> Snapshot {
         // The common dir (not --show-toplevel) so a linked worktree reports
         // its main repo's name rather than the worktree folder's.
-        // --path-format needs git 2.31; an older git falls back to the
-        // branch alone rather than hiding the widget.
-        let lines = (git(cwd, ["rev-parse", "--path-format=absolute",
-                               "--git-common-dir", "--abbrev-ref", "HEAD"])
-                     ?? git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]))?
+        // --path-format needs git 2.31; an older git echoes the unknown flag
+        // back and still exits 0, so the line count (not the exit status)
+        // decides whether the repo name is usable.
+        let lines = git(cwd, ["rev-parse", "--path-format=absolute",
+                              "--git-common-dir", "--abbrev-ref", "HEAD"])?
             .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) } ?? []
         guard let raw = lines.last, !raw.isEmpty else {
             return Snapshot()   // not a git repo (or no git)
@@ -700,12 +700,15 @@ final class GitStatusModel: ObservableObject {
         return s
     }
 
-    /// `/x/conterm/.git` → `conterm`; bare `/x/conterm.git` → `conterm`.
+    /// `/x/conterm/.git` → `conterm`; bare `/x/conterm.git` → `conterm`;
+    /// a hidden bare dir such as `/x/conterm/.bare` → `conterm`.
     nonisolated static func repoName(commonDir: String) -> String {
         let url = URL(fileURLWithPath: commonDir)
-        let name = url.lastPathComponent == ".git"
-            ? url.deletingLastPathComponent().lastPathComponent
-            : url.lastPathComponent
+        let name = url.lastPathComponent
+        // `.git`, `.bare` and the like: the repo is the folder holding it.
+        if name.hasPrefix(".") { return url.deletingLastPathComponent().lastPathComponent }
+        // Only a bare common dir carries the `.git` suffix; a checkout's
+        // common dir always ends in `/.git`, so `site.git/.git` stays `site.git`.
         return name.hasSuffix(".git") ? String(name.dropLast(4)) : name
     }
 
@@ -749,7 +752,9 @@ struct GitWidget: View {
                                 .font(.system(size: Theme.ui(11), weight: .medium, design: .rounded))
                                 .foregroundStyle(Theme.textSecondary)
                                 .lineLimit(1)
-                                .frame(maxWidth: Theme.ui(compact ? 120 : 90))
+                                // Narrower in the sidebar tray, which also holds the
+                                // branch and counters inside a 260–360pt column.
+                                .frame(maxWidth: Theme.ui(compact ? 75 : 90))
                                 .fixedSize(horizontal: true, vertical: false)
                         }
                         Text(branch)
@@ -795,7 +800,9 @@ struct GitWidget: View {
     }
 
     private var help: String {
-        var s = "git · \(model.snap.repo ?? "?") · \(model.snap.branch ?? "?")"
+        var s = "git"
+        if let repo = model.snap.repo { s += " · \(repo)" }
+        s += " · \(model.snap.branch ?? "?")"
         if model.snap.dirty { s += " · uncommitted changes" }
         if model.snap.ahead > 0 { s += " · ↑\(model.snap.ahead)" }
         if model.snap.behind > 0 { s += " · ↓\(model.snap.behind)" }
