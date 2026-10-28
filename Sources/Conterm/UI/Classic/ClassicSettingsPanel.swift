@@ -18,6 +18,7 @@ struct ClassicSettingsPanel: View {
     // isn't the default section, so the initial `false` is never shown.
     @State private var claudeIntegrationOn = false
     @State private var claudeUsageTapOn = false
+    @State private var claudeUsageTapProblem: ClaudeUsageTap.Outcome?
     @State private var codexIntegrationOn = false
     @State private var codexAwaitsTrust = false
     @State private var openCodeIntegrationOn = false
@@ -920,17 +921,21 @@ struct ClassicSettingsPanel: View {
                     .labelsHidden()
                 }
                 SettingsRow(title: "Claude usage limits",
-                            subtitle: "Feed the usage-limits widget from the data Claude Code gives its status line (5-hour and weekly, Pro and Max plans). Wraps your status line command in ~/.claude/settings.json; it looks the same, and turning this off restores it.") {
+                            subtitle: ClaudeUsageTap.settingsSubtitle(
+                                integrationOn: claudeIntegrationOn, problem: claudeUsageTapProblem)) {
                     Toggle("", isOn: Binding(
                         get: { claudeUsageTapOn },
                         set: { on in
-                            if on { ClaudeUsageTap.install() }
-                            else  { ClaudeUsageTap.uninstall() }
+                            let outcome = on ? ClaudeUsageTap.install() : ClaudeUsageTap.uninstall()
+                            claudeUsageTapProblem = outcome == .ok ? nil : outcome
                             claudeUsageTapOn = ClaudeUsageTap.isInstalled
                         }
                     ).withSound())
                     .toggleStyle(.switch)
                     .labelsHidden()
+                    // The widget only learns a Claude session is open from the
+                    // integration's hooks; an installed tap can still be removed.
+                    .disabled(!claudeIntegrationOn && !claudeUsageTapOn)
                 }
                 SettingsRow(title: "Codex integration",
                             subtitle: codexAwaitsTrust

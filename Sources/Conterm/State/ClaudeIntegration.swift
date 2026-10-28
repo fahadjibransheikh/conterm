@@ -327,7 +327,7 @@ enum AgentHooks {
         }
     }
 
-    static func readJSON(_ spec: AgentHookSpec) -> [String: Any]? {
+    nonisolated static func readJSON(_ spec: AgentHookSpec) -> [String: Any]? {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: spec.settingsPath)),
               let obj = try? JSONSerialization.jsonObject(with: data),
               let dict = obj as? [String: Any] else { return nil }

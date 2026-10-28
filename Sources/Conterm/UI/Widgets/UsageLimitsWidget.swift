@@ -40,6 +40,9 @@ final class UsageLimitsModel: ObservableObject {
     /// Providers whose last read failed: their numbers are the previous
     /// reading, shown dimmed, never passed off as current.
     @Published private(set) var stale: Set<AgentTool> = []
+    /// `ClaudeUsageTap.isInstalled`, read off the main thread with each
+    /// refresh so the popover doesn't parse settings.json on every render.
+    @Published private(set) var claudeTapInstalled = false
     private var timer: Timer?
     private var inFlight: Set<AgentTool> = []
     private var activeObs: NSObjectProtocol?
@@ -80,10 +83,15 @@ final class UsageLimitsModel: ObservableObject {
         for tool in AgentCenter.shared.openTools where Self.providers.contains(tool) {
             guard !inFlight.contains(tool) else { continue }
             inFlight.insert(tool)
+            let transcripts = AgentCenter.shared.codexTranscripts
             Task.detached(priority: .utility) {
-                let read = tool == .claude ? ClaudeUsageTap.read() : Self.readCodex()
+                let read = tool == .claude ? ClaudeUsageTap.read() : Self.readCodex(transcripts)
+                let tapInstalled = tool == .claude ? ClaudeUsageTap.isInstalled() : nil
                 await MainActor.run {
                     self.inFlight.remove(tool)
+                    if let tapInstalled, tapInstalled != self.claudeTapInstalled {
+                        self.claudeTapInstalled = tapInstalled
+                    }
                     guard let read else { self.stale.insert(tool); return }
                     self.stale.remove(tool)
                     if self.limits[tool] != read { self.limits[tool] = read }
@@ -115,9 +123,10 @@ final class UsageLimitsModel: ObservableObject {
         return "\(InstanceState.userHome)/.codex"
     }
 
-    nonisolated private static func readCodex() -> UsageLimits? {
+    /// The live sessions' own rollouts first, then the newest on disk.
+    nonisolated private static func readCodex(_ transcripts: [String]) -> UsageLimits? {
         let root = URL(fileURLWithPath: codexHome).appendingPathComponent("sessions")
-        for path in newestRollouts(under: root) {
+        for path in transcripts + newestRollouts(under: root) {
             guard let h = FileHandle(forReadingAtPath: path) else { continue }
             defer { try? h.close() }
             // A token_count lands after every turn, so the tail holds the latest.
@@ -216,19 +225,11 @@ struct UsageLimitsWidget: View {
                     SoundEffects.shared.play(.toggle)
                 }) {
                     HStack(spacing: Theme.ui(5)) {
+                        // Plain marks: the pill is one button. Switching
+                        // provider happens in the popover.
                         ForEach(open, id: \.self) { t in
-                            if open.count > 1 {
-                                // Its own button so a click on a mark switches
-                                // provider instead of opening the popover.
-                                Button { selectedRaw = t.rawValue } label: {
-                                    AgentMark(tool: t, size: Theme.ui(11))
-                                        .opacity(t == tool ? 1 : 0.35)
-                                }
-                                .buttonStyle(.plain)
-                                .help("Show \(t.displayName) limits")
-                            } else {
-                                AgentMark(tool: t, size: Theme.ui(11))
-                            }
+                            AgentMark(tool: t, size: Theme.ui(11))
+                                .opacity(t == tool ? 1 : 0.35)
                         }
                         reading(model.limits[tool]?.fiveHour, label: "5h")
                         widgetChipDivider()
@@ -237,7 +238,8 @@ struct UsageLimitsWidget: View {
                     .opacity(model.stale.contains(tool) ? 0.5 : 1)
                 }
                 .dropPopover(isPresented: $showingPopover) {
-                    UsageLimitsPopover(tools: open, model: model)
+                    UsageLimitsPopover(tools: open, model: model,
+                                       selected: tool, select: { selectedRaw = $0.rawValue })
                 }
             }
         }
@@ -285,6 +287,8 @@ private func resetPhrase(_ w: UsageWindow, prefix: String) -> String {
 private struct UsageLimitsPopover: View {
     var tools: [AgentTool]
     @ObservedObject var model: UsageLimitsModel
+    var selected: AgentTool
+    var select: (AgentTool) -> Void
 
     var body: some View {
         WidgetPopoverChrome(title: "Usage limits", width: 270, trailing: { EmptyView() }) {
@@ -292,10 +296,26 @@ private struct UsageLimitsPopover: View {
                 ForEach(tools, id: \.self) { tool in
                     VStack(alignment: .leading, spacing: Theme.ui(7)) {
                         HStack(spacing: Theme.ui(6)) {
-                            AgentMark(tool: tool, size: Theme.ui(13))
-                            Text(tool.displayName)
-                                .font(.system(size: Theme.ui(11.5), weight: .semibold, design: .rounded))
-                                .foregroundStyle(Theme.textPrimary)
+                            if tools.count > 1 {
+                                Button { select(tool) } label: {
+                                    HStack(spacing: Theme.ui(6)) {
+                                        AgentMark(tool: tool, size: Theme.ui(13))
+                                        Text(tool.displayName)
+                                            .font(.system(size: Theme.ui(11.5), weight: .semibold, design: .rounded))
+                                            .foregroundStyle(Theme.textPrimary)
+                                        Image(systemName: tool == selected ? "pin.fill" : "pin")
+                                            .font(.system(size: Theme.ui(9)))
+                                            .foregroundStyle(Theme.textSecondary)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .help(tool == selected ? "Shown in the pill" : "Show \(tool.displayName) in the pill")
+                            } else {
+                                AgentMark(tool: tool, size: Theme.ui(13))
+                                Text(tool.displayName)
+                                    .font(.system(size: Theme.ui(11.5), weight: .semibold, design: .rounded))
+                                    .foregroundStyle(Theme.textPrimary)
+                            }
                             Spacer()
                             if model.stale.contains(tool), model.limits[tool] != nil {
                                 Text("unavailable")
@@ -313,7 +333,7 @@ private struct UsageLimitsPopover: View {
                         bar("Weekly", l?.weekly, tint: tool.glowColor)
                         if l == nil {
                             Text(tool == .claude
-                                 ? (ClaudeUsageTap.isInstalled
+                                 ? (model.claudeTapInstalled
                                     ? "No reading yet — Claude Code reports limits after its first reply (Pro and Max plans)."
                                     : "Turn on Settings ▸ Config ▸ Claude usage limits.")
                                  : "No reading yet — Codex logs limits after its first turn.")

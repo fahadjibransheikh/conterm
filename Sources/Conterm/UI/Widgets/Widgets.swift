@@ -48,7 +48,7 @@ enum WidgetKind: String, CaseIterable, Identifiable {
         case .github:       return "PR review + checks for the active repo (uses gh)."
         case .pixelPet:     return "A tiny companion that naps, blinks, and watches your agents."
         case .publicIP:     return "Your public IP, VPN-aware; re-checks on network changes and notifies when it moves."
-        case .usageLimits:  return "Claude and Codex 5-hour + weekly limits, shown while their sessions are open."
+        case .usageLimits:  return "Claude and Codex 5-hour + weekly limits while their sessions are open (needs their integration in Settings ▸ Config)."
         }
     }
     /// Bundled monochrome mark (template-tinted) that replaces the SF

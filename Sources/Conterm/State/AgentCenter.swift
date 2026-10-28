@@ -690,6 +690,10 @@ final class AgentCenter: ObservableObject {
     /// Which agent CLIs have a live session in any pane — gates the
     /// usage-limits widget's providers. Kept beside `runningCount`.
     @Published private(set) var openTools: Set<AgentTool> = []
+    /// Rollout files of the live Codex sessions, so the usage widget reads
+    /// them directly instead of finding `$CODEX_HOME`, which a Dock launch
+    /// doesn't inherit.
+    private(set) var codexTranscripts: [String] = []
 
     private let store = AgentTranscriptStore()
     private let ioQueue = DispatchQueue(label: "conterm.agentcenter.io", qos: .utility)
@@ -718,12 +722,13 @@ final class AgentCenter: ObservableObject {
     /// if a center surface is open, refreshes the roster immediately rather
     /// than waiting for the next 2s tick.
     func noteAgentActivity() {
-        let live = (NSApp.delegate as? AppDelegate)?.windows.flatMap { wc in
+        let panes = (NSApp.delegate as? AppDelegate)?.windows.flatMap { wc in
             wc.state.tabs.flatMap { $0.paneTree.root.leaves() }
-        }.map(\.agent).filter { $0.phase != .idle } ?? []
-        if live.count != runningCount { runningCount = live.count }
-        let tools = Set(live.map(\.tool))
+        }.filter { $0.agent.phase != .idle } ?? []
+        if panes.count != runningCount { runningCount = panes.count }
+        let tools = Set(panes.map(\.agent.tool))
         if tools != openTools { openTools = tools }
+        codexTranscripts = panes.filter { $0.agent.tool == .codex }.compactMap(\.agentTranscriptPath)
         if observers > 0 { refresh() }
         syncToolPoll()
     }
