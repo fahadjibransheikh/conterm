@@ -222,12 +222,19 @@ enum AgentHooks {
         writeScript()
         let dir = (spec.settingsPath as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let exists = FileManager.default.fileExists(atPath: spec.settingsPath)
+        // A settings file that exists but doesn't read as a JSON object is
+        // left untouched: writing back would replace every key in it.
+        let existing = readJSON(spec)
+        if exists && existing == nil {
+            NSLog("conterm: \(spec.settingsPath) isn't a readable JSON object; hooks not installed")
+            return
+        }
         // Back up the user's original once.
-        if FileManager.default.fileExists(atPath: spec.settingsPath),
-           !FileManager.default.fileExists(atPath: spec.backupPath) {
+        if exists, !FileManager.default.fileExists(atPath: spec.backupPath) {
             try? FileManager.default.copyItem(atPath: spec.settingsPath, toPath: spec.backupPath)
         }
-        var root = readJSON(spec) ?? [:]
+        var root = existing ?? [:]
         var hooks = root["hooks"] as? [String: Any] ?? [:]
         for event in spec.events {
             var groups = hooks[event] as? [[String: Any]] ?? []
