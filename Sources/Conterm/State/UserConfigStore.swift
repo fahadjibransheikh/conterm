@@ -136,17 +136,12 @@ enum UserConfigStore {
     /// `theme =` line, so a hardcoded palette silently shadows the pick.
     /// Emitting the theme's own colors as the LAST explicit keys makes
     /// the pick win regardless. Non-destructive: the user's earlier lines
-    /// stay (just overridden, or commented out with `disabledMarker` for a
-    /// light/dark pair); removing this block restores them.
+    /// stay (just overridden); removing this block restores them.
     /// `colorLines` are verbatim `key = value` lines from the theme file.
-    static func writeManagedThemeBlock(themeID: String, colorLines: [String],
-                                       disablingExplicitColors: Bool = false) {
+    static func writeManagedThemeBlock(themeID: String, colorLines: [String]) {
         var lines = currentLines()
         lines = strippingManagedThemeBlock(lines)
         lines = strippingTopLevelTheme(lines)
-        lines = disablingExplicitColors
-            ? disablingColorLines(lines, themesDir: InstanceState.configPath("themes"))
-            : restoringColorLines(lines)
         while let last = lines.last,
               last.trimmingCharacters(in: .whitespaces).isEmpty {
             lines.removeLast()
@@ -165,13 +160,13 @@ enum UserConfigStore {
     /// Drop the managed theme block so the user's own config (and any
     /// `config-file`-included Ghostty config) sets the colors again.
     static func removeManagedThemeBlock() {
-        let lines = restoringColorLines(strippingManagedThemeBlock(currentLines()))
+        let lines = strippingManagedThemeBlock(currentLines())
         persist(lines)
     }
 
     /// The theme id recorded inside the managed block, if present — the
-    /// picker's current selection, or `light | dark` for a pair. nil when
-    /// the block is absent (the user's config owns the colors).
+    /// picker's current selection. nil when the block is absent (the
+    /// user's config owns the colors).
     static func managedThemeID() -> String? {
         let lines = currentLines()
         guard let start = lines.firstIndex(where: {
@@ -215,37 +210,6 @@ enum UserConfigStore {
         var result = lines
         result.removeSubrange(start...min(end, lines.count - 1))
         return result
-    }
-
-    static let disabledMarker = "# (off: theme picker follows macOS) "
-    private static let colorKeys: Set<String> = [
-        "background", "foreground", "palette", "cursor-color", "cursor-text",
-        "selection-background", "selection-foreground", "bold-color",
-        "split-divider-color",
-    ]
-
-    /// Comment out explicit colors and includes of files in `themesDir`.
-    /// libghostty replays every loaded line over a `theme`, so either would
-    /// pin one appearance's colors over a light/dark pair. Commented with
-    /// `disabledMarker`, not removed, so `restoringColorLines` can undo it.
-    static func disablingColorLines(_ lines: [String], themesDir: String) -> [String] {
-        let dir = (themesDir as NSString).standardizingPath + "/"
-        return lines.map { line in
-            let t = line.trimmingCharacters(in: .whitespaces)
-            guard !t.hasPrefix("#"), let eq = t.firstIndex(of: "=") else { return line }
-            let key = t[..<eq].trimmingCharacters(in: .whitespaces)
-            var value = t[t.index(after: eq)...].trimmingCharacters(in: .whitespaces)
-            if value.hasPrefix("?") { value.removeFirst() }   // optional include
-            value = value.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-            let path = ((value as NSString).expandingTildeInPath as NSString).standardizingPath
-            let themeInclude = key == "config-file" && path.hasPrefix(dir)
-            return colorKeys.contains(key) || themeInclude ? disabledMarker + line : line
-        }
-    }
-
-    /// Undo `disablingColorLines`: back to the user's own colors.
-    static func restoringColorLines(_ lines: [String]) -> [String] {
-        lines.map { $0.hasPrefix(disabledMarker) ? String($0.dropFirst(disabledMarker.count)) : $0 }
     }
 
     /// Drop any uncommented top-level `theme = …` line — the picker owns
